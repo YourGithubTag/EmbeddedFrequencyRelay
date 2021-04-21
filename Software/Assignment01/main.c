@@ -98,7 +98,11 @@ static void WallSwitchPoll(void *pvParameters) {
 
 }
 
-// Checks the newFreqQ to see if there is a new frequency
+/* Checks the newFreqQ for new frequencies
+ * Updates the loadManageState flag if the system needs to enter shedding mode
+ * Sends frequency information to the VGA Display Task
+ */
+
 void StabilityControlCheck(void *pvParameters)
 {
 	// QUESTION: How long should this function be waiting for the ISR to put something in the queue? How do we know what the vTaskDelay needs to be?
