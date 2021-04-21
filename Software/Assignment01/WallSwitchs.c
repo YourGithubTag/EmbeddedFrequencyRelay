@@ -1,7 +1,6 @@
 #include "main.h"
 #include "WallSwitchs.h"
 
-
 #include <stdio.h>
 #include <unistd.h>
 #include "system.h"
@@ -19,15 +18,14 @@ while(1)
 
     if (CurrSwitchValue != PrevSwitchValue ) {
         
-        if (xQueueSend(newLoadQ, &currentSwitchValue, 10) == pdTRUE) {
-
+        if (xQueueSend(newLoadQ, &CurrSwitchValue, 10) == pdTRUE) {
+        	;
             
         } else {
             printf("failed send");
         }
 
     }
-
 
 
   }
