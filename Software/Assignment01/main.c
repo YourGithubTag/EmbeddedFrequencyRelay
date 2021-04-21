@@ -52,6 +52,7 @@ QueueHandle_t newLoadQ ;
 // Queue for FreqAnalyserISR and StabilityControlCheck
 QueueHandle_t newFreqQ;
 
+
 /*---------- INTERRUPT SERVICE ROUTINES ----------*/
 // ISR for handling Frequency Relay Interrupt
 void freq_relay(){
