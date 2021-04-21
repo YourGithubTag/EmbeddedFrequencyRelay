@@ -1,4 +1,3 @@
-
 // Standard includes
 #include <stddef.h>
 #include <stdio.h>
@@ -36,26 +35,21 @@ SemaphoreHandle_t shared_resource_sem;
 
 // globals variables
 QueueHandle_t newLoadQ ;
-int main(int argc, char* argv[], char* envp[]){
-    return 0;
-}
-
-
 
 
 
 static void WallSwitchPoll(void *pvParameters) {
-	unsigned int CurrSwitchValue;
-	unsigned int PrevSwitchValue;
+	unsigned int CurrSwitchValue = 0;
+	unsigned int PrevSwitchValue = 0;
 
-  {
+  while (1){
     // read the value of the switch and store to uiSwitchValue
     CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
 
     if (CurrSwitchValue != PrevSwitchValue ) {
         
         if (xQueueSend(newLoadQ, &CurrSwitchValue, 10) == pdTRUE) {
-        	;
+        	printf("%d", CurrSwitchValue );
         } else {
             printf("failed send");
         }
@@ -66,3 +60,9 @@ static void WallSwitchPoll(void *pvParameters) {
   }
 
 }
+
+int main(int argc, char* argv[], char* envp[]){
+	WallSwitchPoll();
+}
+
+
