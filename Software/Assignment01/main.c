@@ -24,13 +24,6 @@
 #include <stdio.h>
 #include <string.h>
 
-// Scheduler includes
-#include "FreeRTOS/FreeRTOS.h"
-#include "FreeRTOS/task.h"
-#include "FreeRTOS/queue.h"
-#include "FreeRTOS/semphr.h"
-
-#include <altera_avalon_pio_regs.h>
 
 // Definition of Task Stacks
 #define   TASK_STACKSIZE       2048
@@ -57,6 +50,42 @@ SemaphoreHandle_t shared_resource_sem;
 // globals variables
 QueueHandle_t newLoadQ ;
 
+
+static void WallSwitchPoll(void *pvParameters) {
+	unsigned int CurrSwitchValue = 0;
+	unsigned int PrevSwitchValue = 0;
+	unsigned int temp;
+
+  while (1){
+    // read the value of the switch and store to uiSwitchValue
+    CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
+
+    if (CurrSwitchValue != PrevSwitchValue ) {
+        
+        if (xQueueSend(newLoadQ, &CurrSwitchValue, 10) == pdTRUE) {
+			xQueueRecieve(newLoadQ, &temp, portMAX_DELAY);
+        	printf("%d", temp);
+        } else {
+            printf("failed send");
+        }
+    }
+
+  vTaskDelay(100);
+
+  }
+
+}
+
+int init CreateTasks() {
+
+	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
+
+}
+
+
+
+
+
 // ISR for handling Frequency Relay Interrupt
 void freq_relay(){
 	unsigned int temp = IORD(FREQUENCY_ANALYSER_BASE, 0);
@@ -78,32 +107,5 @@ int main(int argc, char* argv[], char* envp[])
 }
 
 
-
-static void WallSwitchPoll(void *pvParameters) {
-	unsigned int CurrSwitchValue = 0;
-	unsigned int PrevSwitchValue = 0;
-
-  while (1){
-    // read the value of the switch and store to uiSwitchValue
-    CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
-
-    if (CurrSwitchValue != PrevSwitchValue ) {
-        
-        if (xQueueSend(newLoadQ, &CurrSwitchValue, 10) == pdTRUE) {
-        	printf("%d", CurrSwitchValue );
-        } else {
-            printf("failed send");
-        }
-    }
-
-  vTaskDelay(100);
-
-  }
-
-}
-
-int main(int argc, char* argv[], char* envp[]){
-	WallSwitchPoll();
-}
 
 
