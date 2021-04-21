@@ -11,16 +11,4 @@
 
 #include <altera_avalon_pio_regs.h>
 
-
-
-QueueHandle_t msgqueue;
-
-// used to delete a task
-TaskHandle_t xHandle;
-
-// Definition of Semaphore
-SemaphoreHandle_t shared_resource_sem;
-
-// globals variables
-QueueHandle_t newLoadQ ;
-
+int main(int argc, char* argv[], char* envp[]);
