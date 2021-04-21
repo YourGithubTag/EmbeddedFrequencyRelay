@@ -89,23 +89,12 @@ static void WallSwitchPoll(void *pvParameters) {
 
 }
 
-int CreateTasks() {
-	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
-	return 0;
-}
- 
-int OSDataInit() {
-	newLoadQ = xQueueCreate( 100, sizeof(unsigned int) );
-	return 0;
-}
-
 
 void StabilityControlCheck(void *pvParameters)
 {
 	unsigned int *freq;
 	while(1)
 	{
-		xQueueReceive(newFreqQ, &freq, portMAX_DELAY);
 		vTaskDelay(20);
 	}
 }
