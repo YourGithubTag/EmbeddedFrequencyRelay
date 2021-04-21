@@ -8,10 +8,10 @@
 #include <string.h>
 
 /* Scheduler includes. */
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
+#include "FreeRTOS/FreeRTOS.h"
+#include "FreeRTOS/task.h"
+#include "FreeRTOS/queue.h"
+#include "FreeRTOS/semphr.h"
 
 /* HAL API includes */
 #include "system.h"
@@ -54,55 +54,65 @@ QueueHandle_t newLoadQ ;
 static void WallSwitchPoll(void *pvParameters) {
 	unsigned int CurrSwitchValue = 0;
 	unsigned int PrevSwitchValue = 0;
-	unsigned int temp;
+	unsigned int temp = 100;
 
   while (1){
-    // read the value of the switch and store to uiSwitchValue
+	  
+    // read the value of the switch
     CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
 
     if (CurrSwitchValue != PrevSwitchValue ) {
         
         if (xQueueSend(newLoadQ, &CurrSwitchValue, 10) == pdTRUE) {
-			xQueueRecieve(newLoadQ, &temp, portMAX_DELAY);
-        	printf("%d", temp);
+			xQueueReceive(newLoadQ, &temp, portMAX_DELAY);
+        	printf("%d \n", temp);
         } else {
-            printf("failed send");
+            printf("failed send \n");
         }
     }
-
   vTaskDelay(100);
 
   }
 
 }
 
-int init CreateTasks() {
-
+int CreateTasks() {
 	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
-
+	return 0;
 }
-
-
-
+ 
+int OSDataInit() {
+	newLoadQ = xQueueCreate( 100, sizeof(unsigned int) );
+	return 0;
+}
 
 
 // ISR for handling Frequency Relay Interrupt
 void freq_relay(){
 	unsigned int temp = IORD(FREQUENCY_ANALYSER_BASE, 0);
-	printf("%f Hz\n", 16000/(double)temp);
+	//printf("%f Hz\n", 16000/(double)temp);
 	return;
 }
 
 int main(int argc, char* argv[], char* envp[])
 {
+	printf("hello from Nios II");
+
+
 	// Register interrupt for frequency analyser component
 	alt_irq_register(FREQUENCY_ANALYSER_IRQ, 0, freq_relay);
+
+	OSDataInit();
+	CreateTasks();
 
 	// Start Scheduler
 	vTaskStartScheduler();
 
 	// Program will only reach here if insufficient heap to start scheduler
-	for(;;)
+	for(;;) {
+		;
+	}
+
     return 0;
 }
 

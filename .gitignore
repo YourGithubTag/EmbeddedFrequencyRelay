@@ -12,3 +12,13 @@ Software/Assignment01/.force_relink
 Software/Assignment01/.project
 
 Software/Assignment01/.settings/language.settings.xml
+
+*.elf
+
+Software/Assignment01/Assignment01.map
+
+*.objdump
+
+*.o
+
+*.d
