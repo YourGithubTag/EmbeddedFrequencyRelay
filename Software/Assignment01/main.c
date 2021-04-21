@@ -46,9 +46,6 @@ TaskHandle_t xHandle;
 // Definition of Semaphore
 SemaphoreHandle_t shared_resource_sem;
 
-SemaphoreHandle_t RedLEDSem;
-SemaphoreHandle_t GreenLEDSem;
-
 // globals variables
 QueueHandle_t newLoadQ ;
 
@@ -80,24 +77,24 @@ void freq_relay(){
 }
 
 static void WallSwitchPoll(void *pvParameters) {
-
 	unsigned int CurrSwitchValue = 0;
 	unsigned int PrevSwitchValue = 0;
 	unsigned int temp = 100;
 
   while (1){
+	  
     // read the value of the switch
     CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
 
     if (CurrSwitchValue != PrevSwitchValue ) {
-
+        
         if (xQueueSend(newLoadQ, &CurrSwitchValue, 10) == pdTRUE) {
-        	PrevSwitchValue = CurrSwitchValue;
+			xQueueReceive(newLoadQ, &temp, portMAX_DELAY);
+        	printf("%d \n", temp);
         } else {
             printf("failed send \n");
         }
     }
-
   vTaskDelay(100);
 
   }
@@ -174,11 +171,11 @@ int main(int argc, char* argv[], char* envp[])
 {
 	printf("hello from Nios II");
 
+
 	// Register interrupt for frequency analyser component
 	alt_irq_register(FREQUENCY_ANALYSER_IRQ, 0, freq_relay);
 
 	OSDataInit();
-	CreateSemaphores();
 	CreateTasks();
 
 	// Start Scheduler
