@@ -52,15 +52,23 @@ QueueHandle_t newLoadQ ;
 // Queue for FreqAnalyserISR and StabilityControlCheck
 QueueHandle_t newFreqQ;
 
+// Mutex for protecting sLoadManageState flag
+SemaphoreHandle_t loadManageState_sem;
+
+// Flag that represents if system is in shedding mode
+unsigned int loadManageState = 0;
 
 /*---------- INTERRUPT SERVICE ROUTINES ----------*/
 // ISR for handling Frequency Relay Interrupt
 void freq_relay(){
 	// Read frequency
-	unsigned int temp = IORD(FREQUENCY_ANALYSER_BASE, 0);
+	double freq = IORD(FREQUENCY_ANALYSER_BASE, 0);
 
 	// Send frequency, if queue is full then do nothing
-	xQueueSend(newFreqQ, (void *)&temp, 0);
+	if (xQueueSend(newFreqQ, (void *)&freq, 0) == pdPASS)
+	{
+		printf("Sent %f Hz.\n", 16000/(double)freq);
+	}
 
 	return;
 }
@@ -90,18 +98,36 @@ static void WallSwitchPoll(void *pvParameters) {
 
 }
 
-
+// Checks the newFreqQ to see if there is a new frequency
 void StabilityControlCheck(void *pvParameters)
 {
-	unsigned int *freq;
+	// QUESTION: How long should this function be waiting for the ISR to put something in the queue? How do we know what the vTaskDelay needs to be?
+	// What should we split our main control task into two for? We do not understand
+
+	double oldFreq;
+	double *currentFreq;
 	while(1)
 	{
-		if (xQueueReceive(newFreqQ, &freq, 0) == pdPASS)
+		// Check if there is a new frequency in the queue
+		if (xQueueReceive(newFreqQ, &currentFreq, 0) == pdPASS)
 		{
-			printf("Frequency %f received.\n");
+			/* Check if the new frequency is below the lower threshold, or rate of change absolute value is too large
+			if (currentFreq < LOWER THRESHOLD VALUE) ||
+			{
+				// If it is, then system needs to enter unstable mode
+				// xSemaphoreTake(loadManageState_sem);
+				// loadManageState = 1;
+				// xSemaphoreGive(loadManageState_sem);
+			}
+
+			// Send frequency values to VGA display
+			// xQueueSend(vgaDisplayQ, &currentFreq, 0)
+
+			// printf("Frequency %f received.\n", *currentFreq);
+			 */
 		}
 
-		vTaskDelay(20);
+		vTaskDelay(50);
 	}
 }
 
