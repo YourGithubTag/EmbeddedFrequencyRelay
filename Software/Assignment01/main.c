@@ -96,8 +96,25 @@ void StabilityControlCheck(void *pvParameters)
 	unsigned int *freq;
 	while(1)
 	{
+		if (xQueueReceive(newFreqQ, &freq, 0) == pdPASS)
+		{
+			printf("Frequency %f received.\n");
+		}
+
 		vTaskDelay(20);
 	}
+}
+
+int CreateTasks() {
+	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
+	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 2, NULL);
+	return 0;
+}
+
+int OSDataInit() {
+	newLoadQ = xQueueCreate( 100, sizeof(unsigned int) );
+	newFreqQ = xQueueCreate(10, sizeof( void* ));
+	return 0;
 }
 
 int main(int argc, char* argv[], char* envp[])
