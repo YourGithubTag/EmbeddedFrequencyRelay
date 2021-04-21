@@ -49,10 +49,13 @@ SemaphoreHandle_t shared_resource_sem;
 // globals variables
 QueueHandle_t newLoadQ ;
 
-// Queue for FreqAnalyserISR and StabilityControlCheck
+// Queue for communication between StabilityControlCheck & VGADisplayTask
+QueueHandle_t vgaDisplayQ;
+
+// Queue for communication between FreqAnalyserISR & StabilityControlCheck
 QueueHandle_t newFreqQ;
 
-// Mutex for protecting sLoadManageState flag
+// Mutex for protecting loadManageState flag
 SemaphoreHandle_t loadManageState_sem;
 
 // Flag that represents if system is in shedding mode
@@ -62,12 +65,12 @@ unsigned int loadManageState = 0;
 // ISR for handling Frequency Relay Interrupt
 void freq_relay(){
 	// Read frequency
-	double freq = IORD(FREQUENCY_ANALYSER_BASE, 0);
+	unsigned int freq = IORD(FREQUENCY_ANALYSER_BASE, 0);
 
 	// Send frequency, if queue is full then do nothing
 	if (xQueueSend(newFreqQ, (void *)&freq, 0) == pdPASS)
 	{
-		printf("Sent %f Hz.\n", 16000/(double)freq);
+		//printf("Sent %f Hz.\n", 16000/(double)freq);
 	}
 
 	return;
@@ -102,19 +105,20 @@ static void WallSwitchPoll(void *pvParameters) {
  * Updates the loadManageState flag if the system needs to enter shedding mode
  * Sends frequency information to the VGA Display Task
  */
-
 void StabilityControlCheck(void *pvParameters)
 {
 	// QUESTION: How long should this function be waiting for the ISR to put something in the queue? How do we know what the vTaskDelay needs to be?
 	// What should we split our main control task into two for? We do not understand
 
 	double oldFreq;
-	double *currentFreq;
+	unsigned int currentFreq;
 	while(1)
 	{
 		// Check if there is a new frequency in the queue
 		if (xQueueReceive(newFreqQ, &currentFreq, 0) == pdPASS)
 		{
+			//printf("Frequency %f received.\n", 16000/(double)currentFreq);
+			xQueueSend(vgaDisplayQ, &currentFreq, 0);
 			/* Check if the new frequency is below the lower threshold, or rate of change absolute value is too large
 			if (currentFreq < LOWER THRESHOLD VALUE) ||
 			{
@@ -127,23 +131,39 @@ void StabilityControlCheck(void *pvParameters)
 			// Send frequency values to VGA display
 			// xQueueSend(vgaDisplayQ, &currentFreq, 0)
 
-			// printf("Frequency %f received.\n", *currentFreq);
+			//
 			 */
 		}
 
-		vTaskDelay(50);
+		vTaskDelay(20);
+	}
+}
+
+// Receives frequency from StabilityControlCheck and outputs to the VGA display
+void VGADisplayTask(void *pvParameters)
+{
+	unsigned int temp;
+	while (1)
+	{
+		if (xQueueReceive(vgaDisplayQ, &temp, 0) == pdPASS)
+		{
+			//printf("Number: %f received.\n", 16000/(double)temp);
+		}
+		vTaskDelay(20);
 	}
 }
 
 int CreateTasks() {
 	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
 	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 2, NULL);
+	xTaskCreate(VGADisplayTask, "VGADisplay", TASK_STACKSIZE, NULL, 3, NULL);
 	return 0;
 }
 
 int OSDataInit() {
 	newLoadQ = xQueueCreate( 100, sizeof(unsigned int) );
 	newFreqQ = xQueueCreate(10, sizeof( void* ));
+	vgaDisplayQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 	return 0;
 }
 
