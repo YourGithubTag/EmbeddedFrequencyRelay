@@ -2,16 +2,17 @@
 // Cecil Symes, Nikhil Kumar
 // csym531, nkmu576
 
+/*---------- INCLUDES ----------*/
 /* Standard includes. */
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
 /* Scheduler includes. */
-#include "FreeRTOS/FreeRTOS.h"
-#include "FreeRTOS/task.h"
-#include "FreeRTOS/queue.h"
-#include "FreeRTOS/semphr.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 /* HAL API includes */
 #include "system.h"
@@ -19,12 +20,8 @@
 #include "io.h"
 #include "altera_avalon_pio_regs.h"
 
-// Standard includes
-#include <stddef.h>
-#include <stdio.h>
-#include <string.h>
 
-
+/*---------- DEFINITIONS ----------*/
 // Definition of Task Stacks
 #define   TASK_STACKSIZE       2048
 
@@ -39,6 +36,8 @@
 // Definition of Message Queue
 #define   MSG_QUEUE_SIZE  30
 
+
+/*---------- GLOBAL VARIABLES ----------*/
 QueueHandle_t msgqueue;
 
 // used to delete a task
@@ -50,6 +49,20 @@ SemaphoreHandle_t shared_resource_sem;
 // globals variables
 QueueHandle_t newLoadQ ;
 
+// Queue for FreqAnalyserISR and StabilityControlCheck
+QueueHandle_t newFreqQ;
+
+/*---------- INTERRUPT SERVICE ROUTINES ----------*/
+// ISR for handling Frequency Relay Interrupt
+void freq_relay(){
+	// Read frequency
+	unsigned int temp = IORD(FREQUENCY_ANALYSER_BASE, 0);
+
+	// Send frequency, if queue is full then do nothing
+	xQueueSend(newFreqQ, (void *)&temp, 0);
+
+	return;
+}
 
 static void WallSwitchPoll(void *pvParameters) {
 	unsigned int CurrSwitchValue = 0;
@@ -87,11 +100,14 @@ int OSDataInit() {
 }
 
 
-// ISR for handling Frequency Relay Interrupt
-void freq_relay(){
-	unsigned int temp = IORD(FREQUENCY_ANALYSER_BASE, 0);
-	//printf("%f Hz\n", 16000/(double)temp);
-	return;
+void StabilityControlCheck(void *pvParameters)
+{
+	unsigned int *freq;
+	while(1)
+	{
+		xQueueReceive(newFreqQ, &freq, portMAX_DELAY);
+		vTaskDelay(20);
+	}
 }
 
 int main(int argc, char* argv[], char* envp[])
