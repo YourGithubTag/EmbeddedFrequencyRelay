@@ -47,19 +47,24 @@ TaskHandle_t xHandle;
 // Definition of Semaphore
 SemaphoreHandle_t shared_resource_sem;
 
+SemaphoreHandle_t RedLEDSem;
+SemaphoreHandle_t GreenLEDSem;
+
 // globals variables
 QueueHandle_t newLoadQ ;
+
+unsigned int RedLEDValue = 31;
+unsigned int GreenLEDValue = 30;
 
 
 static void load_Manage(void *pvParameters) {
 
-	int temp = 0;
+	unsigned int temp = 0;
 	int switches[7]; 
 	int iter = 0;
 
 	while (1) {
 			if (xQueueReceive(newLoadQ, &temp, portMAX_DELAY) == pdTRUE) {
-
 				
 				iter = 0;
 				for (int i = 1; i <= 64 ; i = i * 2) {
@@ -69,6 +74,12 @@ static void load_Manage(void *pvParameters) {
 						switches[iter] = 0;
 					}
 					iter++;
+				}
+				
+				if (xSemaphoreTake(RedLEDSem, (TickType_t) 100) == pdTRUE ) {
+					RedLEDValue = temp;
+					printf("%d", RedLEDValue );
+					xSemaphoreGive(RedLEDSem);
 				}
 
 				printf("%d, %d, %d, %d, %d, %d, %d \n", switches[6],switches[5],switches[4],switches[3],switches[2],switches[1],switches[0]);
@@ -98,13 +109,35 @@ static void WallSwitchPoll(void *pvParameters) {
     }
 
   vTaskDelay(100);
+
   }
 
 }
 
+static void RedLEDHandler(void *pvParameters) {
+	unsigned int temp = 0;
+
+	while (1) {
+		
+		if (xSemaphoreTake(RedLEDSem, (TickType_t) 10) == pdTRUE) {
+			IOWR_ALTERA_AVALON_PIO_DATA(RED_LEDS_BASE, RedLEDValue );
+			xSemaphoreGive(RedLEDSem);
+	}
+
+	vTaskDelay(1000);
+}
+}
+
 int CreateTasks() {
 	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
-	xTaskCreate(load_Manage,"Load_Management",TASK_STACKSIZE, NULL, 2,NULL);
+	xTaskCreate(load_Manage,"Load_Management",TASK_STACKSIZE, NULL, 3,NULL);
+	xTaskCreate(RedLEDHandler, "Red LED display",TASK_STACKSIZE,NULL,2,NULL);
+	return 0;
+}
+
+int CreateSemaphores() {
+	RedLEDSem = xSemaphoreCreateCounting(10,0);
+	GreenLEDSem = xSemaphoreCreateCounting(10,0);
 	return 0;
 }
  
@@ -129,6 +162,7 @@ int main(int argc, char* argv[], char* envp[])
 	alt_irq_register(FREQUENCY_ANALYSER_IRQ, 0, freq_relay);
 
 	OSDataInit();
+	CreateSemaphores();
 	CreateTasks();
 
 	// Start Scheduler
