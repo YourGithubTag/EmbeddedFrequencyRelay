@@ -35,3 +35,4 @@ SemaphoreHandle_t shared_resource_sem;
 // globals variables
 QueueHandle_t newLoadQ ;
 
+
