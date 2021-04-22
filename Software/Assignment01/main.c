@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 /* Scheduler includes. */
 #include "FreeRTOS/FreeRTOS.h"
@@ -19,6 +20,7 @@
 #include "sys/alt_irq.h"
 #include "io.h"
 #include "altera_avalon_pio_regs.h"
+#include "unistd.h"
 
 
 /*---------- DEFINITIONS ----------*/
@@ -80,21 +82,32 @@ typedef struct LEDstatus {
 	
 } LEDStruct;
 
+// Global double stores current rate of change
+double rateOfChange = 0;
+
+// Mutex to protect rate of change global variable
+SemaphoreHandle_t roc_mutex;
 
 /*---------- INTERRUPT SERVICE ROUTINES ----------*/
 // ISR for handling Frequency Relay Interrupt
 void freq_relay(){
-	// Read frequency
-	unsigned int freq = IORD(FREQUENCY_ANALYSER_BASE, 0);
+	// Read ADC count
+	unsigned int adcCount = IORD(FREQUENCY_ANALYSER_BASE, 0);
+	//unsigned int adcCount = 0;
 
-	// Send frequency, if queue is full then do nothing
-	if (xQueueSend(newFreqQ, (void *)&freq, 0) == pdPASS)
+	// Send count if queue not full
+	if (xQueueIsQueueFullFromISR(newFreqQ) == pdFALSE)
 	{
-		//printf("Sent %f Hz.\n", 16000/(double)freq);
-	}
+		xQueueSendFromISR(newFreqQ, (void *)&adcCount, NULL);
 
+//		// DEBUG
+//		printf("%f Hz\n", 16000/(double)adcCount);
+//		usleep(50);
+	}
 	return;
 }
+
+/*---------- FUNCTION DEFINITIONS ----------*/
 
 
 static void load_manage(void *pvParameters) {
@@ -215,62 +228,168 @@ static void WallSwitchPoll(void *pvParameters) {
 
 }
 
-/* Checks the newFreqQ for new frequencies
- * Updates the loadManageState flag if the system needs to enter shedding mode
- * Sends frequency information to the VGA Display Task
- */
+// Checks the newFreqQ for new frequencies, calculates rate of change
+// Updates the loadManageState flag if the system needs to enter shedding mode
+// Sends frequency information to the VGA Display Task
 void StabilityControlCheck(void *pvParameters)
 {
-	// QUESTION: How long should this function be waiting for the ISR to put something in the queue? How do we know what the vTaskDelay needs to be?
-	// What should we split our main control task into two for? We do not understand
+// TEST CODE
+//	unsigned int temp = 0;
+//
+//	while(1)
+//	{
+//		if (xQueueReceive(newFreqQ, &temp, portMAX_DELAY) == pdTRUE)
+//		{
+//			printf("Received ADC count of %d\n", temp);
+//			usleep(50);
+//
+//			if (xQueueSend(vgaFreqQ, (void *)&temp, NULL) == pdTRUE)
+//			{
+//				printf("Sent ADC count of %d to VGA Task\n", temp);
+//				usleep(50);
+//			}
+//		}
+//	}
 
-	double oldFreq;
-	unsigned int currentFreq;
+	// Stores old frequency and ADC count for rate of change calculation
+	double oldFreq = 0;
+	unsigned int oldCount = 0;
+
+	// Stores latest frequency and ADC count information from freq_relay ISR
+	double newFreq = 0;
+	unsigned int newCount = 0;
+
+	// Buffers the queue data so old count can be saved
+	unsigned int temp = 0;
+
+	// Lowest frequency possible before system enters shedding mode
+	double lowerBound = 0;
+
+	// Local variable for rate of change
+	double rocLocal = 0;
+
+	// Max absolute rate of change before system enters shedding mode
+	double rocThreshold = 0;
+
 	while(1)
 	{
-		// Check if there is a new frequency in the queue
-		if (xQueueReceive(newFreqQ, &currentFreq, 0) == pdPASS)
+		/* THRESHOLD VALUE CHECK */
+		// Keyboard logic
+		// Chekc keyboard queue
+		// Take in inputs
+		// Change the lower bound and rate of change threshold
+
+		/* SYSTEM STABILITY CHECK */
+		// Wait for new frequency in queue
+		if (xQueueReceive(newFreqQ, &temp, portMAX_DELAY) == pdTRUE)
 		{
-			//printf("Frequency %f received.\n", 16000/(double)currentFreq);
-			xQueueSend(vgaDisplayQ, &currentFreq, 0);
-			/* Check if the new frequency is below the lower threshold, or rate of change absolute value is too large
-			if (currentFreq < LOWER THRESHOLD VALUE) ||
+			// Save current count, save old count
+			oldCount = newCount;
+			newCount = temp;
+
+			// Convert counts to frequencies
+			oldFreq = 16000/(double)oldCount;
+			newFreq = 16000/(double)newCount;
+
+			// Write rate of change to global variable
+			xSemaphoreTake(roc_mutex, portMAX_DELAY);
+			rateOfChange = fabs((newFreq - oldFreq) * 16000 / ((newCount + (double)oldCount)/2));
+			rocLocal = rateOfChange;
+			xSemaphoreGive(roc_mutex);
+
+			// Send current frequency to VGA Display Task if queue isn't full
+			if (uxQueueSpacesAvailable(vgaFreqQ) == 0)
 			{
-				// If it is, then system needs to enter unstable mode
-				// xSemaphoreTake(loadManageState_sem);
-				// loadManageState = 1;
-				// xSemaphoreGive(loadManageState_sem);
+				printf("VGA FREQ QUEUE FULL.\n");
+				usleep(50);
+			}
+			else
+			{
+				xQueueSend(vgaFreqQ, &newCount, 0);
 			}
 
-			// Send frequency values to VGA display
-			// xQueueSend(vgaDisplayQ, &currentFreq, 0)
+			// Check stable system for instability
+			// Take stability flag mutex
+			if () // System stable
+			{
+				// TODO: Check if current freq is under lower threshold OR rate of change too high
+				if ((newFreq < lowerBound) || (rocLocal > rocThreshold))
+				{
+					// Take mutex
+					// Set the unstable flag
+					// Give mutex
+				}
+			}
+			// Check unstable system for stability
+			else
+			{
+				// TODO: Check if current freq is under lower threshold OR rate of change too high
+				if ((newFreq >= lowerBound) && (rocLocal <= rocThreshold))
+				{
+					// Take mutex
+					// Remove the unstable flag
+					// Give mutex
+				}
+			}
 
-			//
-			 */
+//			// DEBUG PRINT
+//			printf("====================\n");
+//			printf("Old freq = %f.\n", oldFreq);
+//			printf("Old count = %d.\n", oldCount);
+//			printf("New freq = %f.\n", newFreq);
+//			printf("New count = %d.\n", newCount);
+//			printf("Absolute Rate of change = %f.\n", rateOfChange);
+//			usleep(100);
+
 		}
-
-		vTaskDelay(20);
 	}
+
 }
 
-// Receives frequency from StabilityControlCheck and outputs to the VGA display
+// Receives frequency information, displays to VGA
 void VGADisplayTask(void *pvParameters)
 {
-	unsigned int temp;
+//	TEST CODE
+//	unsigned int temp = 0;
+//
+//	while(1)
+//	{
+//		if (xQueueReceive(vgaFreqQ, &temp, portMAX_DELAY) == pdTRUE)
+//		{
+//			printf("Received ADC count of %d from StabControlCheck\n", temp);
+//			usleep(50);
+//		}
+//	}
+
+	// Stores latest ADC Count, frequency from StabilityControlChecker, and rate of change from global variable
+	unsigned int newCount = 0;
+	double newFreq = 0;
+	double roc_local = 0;
+
+	// TODO: Do we need an array to store old values for freq/count?
+
 	while (1)
 	{
-		if (xQueueReceive(vgaDisplayQ, &temp, 0) == pdPASS)
+		// Receive new ADC Count
+		if (xQueueReceive(vgaFreqQ, &newCount, portMAX_DELAY) == pdPASS)
 		{
-			//printf("Number: %f received.\n", 16000/(double)temp);
+			newFreq = 16000/(double)newCount;
+			printf("VGA received new frequency of %f.\n", newFreq);
+			usleep(50);
+
+			// Store global rate of change locally
+			xSemaphoreTake(roc_mutex, portMAX_DELAY);
+			roc_local = rateOfChange;
+			xSemaphoreGive(roc_mutex);
+			printf("Current rate of change is %f\n", roc_local);
+
+			// Send data to monitor
+			// TODO: All displaying info and shit here
 		}
-		vTaskDelay(20);
 	}
 }
 
-int CreateSemaphores() {
-	TimerSync_sem = xSemaphoreCreateBinary();
-}
-
+// Creates all tasks used
 int CreateTasks() {
 	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
 	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 2, NULL);
@@ -280,25 +399,46 @@ int CreateTasks() {
 	return 0;
 }
 
+// Initialises all data structures used
+
+int CreateTimers() {
+	Timer500 = xTimerCreate("instablility Timer", 500, pdTRUE, NULL);
+}
 
 int OSDataInit() {
 	SwitchQ = xQueueCreate( 100, sizeof(unsigned int) );
 	newFreqQ = xQueueCreate(10, sizeof( void* ));
 	LEDQ = xQueueCreate(100, sizeof(LEDStruct));
 	vgaDisplayQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
+	// Initialise Queues
+	newLoadQ = xQueueCreate( 100, sizeof(unsigned int) );
+	newFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
+	vgaFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
+
+	// Initialise mutexes
+	roc_mutex = xSemaphoreCreateMutex();
+	return 0;
+}
+
+// Initialise all ISRs
+int initISR()
+{
+	alt_irq_register(FREQUENCY_ANALYSER_IRQ, 0, freq_relay);
 	return 0;
 }
 
 int main(int argc, char* argv[], char* envp[])
 {
-	printf("hello from Nios II");
+	printf("Hello from Nios II!\n");
 
-
-	// Register interrupt for frequency analyser component
-	alt_irq_register(FREQUENCY_ANALYSER_IRQ, 0, freq_relay);
-
+	// Initialise data structures
 	OSDataInit();
+
+	// Create all tasks
 	CreateTasks();
+
+	// Register all ISRs
+	initISR();
 
 	// Start Scheduler
 	vTaskStartScheduler();
@@ -310,7 +450,3 @@ int main(int argc, char* argv[], char* envp[])
 
     return 0;
 }
-
-
-
-
