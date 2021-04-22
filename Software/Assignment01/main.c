@@ -51,8 +51,6 @@ SemaphoreHandle_t shared_resource_sem;
 // globals variables
 QueueHandle_t newLoadQ ;
 
-// Queue for communication between StabilityControlCheck & VGADisplayTask
-QueueHandle_t vgaDisplayQ;
 // Queue for StabilityControlTask to send frequency information to VGA Display Task
 QueueHandle_t vgaFreqQ;
 
@@ -74,8 +72,6 @@ SemaphoreHandle_t roc_mutex;
 /*---------- INTERRUPT SERVICE ROUTINES ----------*/
 // ISR for handling Frequency Relay Interrupt
 void freq_relay(){
-	// Read frequency
-	unsigned int freq = IORD(FREQUENCY_ANALYSER_BASE, 0);
 	// Read ADC count
 	unsigned int adcCount = IORD(FREQUENCY_ANALYSER_BASE, 0);
 	//unsigned int adcCount = 0;
