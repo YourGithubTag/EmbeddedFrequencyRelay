@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "freertos/timers.h"
 
 /* HAL API includes */
 #include "system.h"
@@ -59,8 +60,8 @@ QueueHandle_t vgaFreqQ;
 // Queue for communication between FreqAnalyserISR & StabilityControlCheck
 QueueHandle_t newFreqQ;
 
-// Mutex for protecting loadManageState flag
-SemaphoreHandle_t InStabilityFlag_sem;
+// Mutex for protecting InStabilityFlag
+SemaphoreHandle_t InStabilityFlag_mutex;
 
 SemaphoreHandle_t TimerSync_sem;
 
@@ -75,7 +76,6 @@ unsigned int MaintanenceModeFlag;
 
 TimerHandle_t Timer500;
 
-
 // Global double stores current rate of change
 double rateOfChange = 0;
 
@@ -87,66 +87,60 @@ SemaphoreHandle_t roc_mutex;
 void freq_relay(){
 	// Read ADC count
 	unsigned int adcCount = IORD(FREQUENCY_ANALYSER_BASE, 0);
-	//unsigned int adcCount = 0;
 
 	// Send count if queue not full
 	if (xQueueIsQueueFullFromISR(newFreqQ) == pdFALSE)
 	{
 		xQueueSendFromISR(newFreqQ, (void *)&adcCount, NULL);
-
-//		// DEBUG
-//		printf("%f Hz\n", 16000/(double)adcCount);
-//		usleep(50);
 	}
 	return;
 }
 
 /*---------- FUNCTION DEFINITIONS ----------*/
 
-
-static void load_manage(void *pvParameters) {
-
-	int previousStabilitystate;
-	// Flag for shedding
-	bool loadShedStatus;
-	//flag for monitor
-	bool monitorMode;
-
-	while(1) {
-
-		if (MaintanenceModeFlag == 0) {
-
-			if (xSemaphoreTake(InStabilityFlag_sem,portMAX_DELAY) == pdTRUE){
-
-				if (InStabilityFlag && !loadShedStatus) {
-					monitorMode = true;
-					loadShedStatus = true;
-					LoadShed();
-					xTimerStart(Timer500, 0);
-				}
-
-				else if (monitorMode && (previousStabilitystate != InStabilityFlag) ) {
-					xTimerReset(Timer500,0);
-					previousStabilitystate = InStabilityFlag;
-				} 
-
-				else if (monitorMode && (Timer500Full == 1)) {
-
-					Timer500Full = 0;
-					xTimerReset(Timer500,0);
-
-					if (InStabilityFlag == 1) {
-						LoadShed();
-					} else {
-						LoadConnect();
-					} 
-				}
-
-
-			}
-		}
-	}
-}
+//static void load_manage(void *pvParameters) {
+//
+//	int previousStabilitystate;
+//	// Flag for shedding
+//	bool loadShedStatus;
+//	//flag for monitor
+//	bool monitorMode;
+//
+//	while(1) {
+//
+//		if (MaintanenceModeFlag == 0) {
+//
+//			if (xSemaphoreTake(InStabilityFlag_sem,portMAX_DELAY) == pdTRUE){
+//
+//				if (InStabilityFlag && !loadShedStatus) {
+//					monitorMode = true;
+//					loadShedStatus = true;
+//					LoadShed();
+//					xTimerStart(Timer500, 0);
+//				}
+//
+//				else if (monitorMode && (previousStabilitystate != InStabilityFlag) ) {
+//					xTimerReset(Timer500,0);
+//					previousStabilitystate = InStabilityFlag;
+//				}
+//
+//				else if (monitorMode && (Timer500Full == 1)) {
+//
+//					Timer500Full = 0;
+//					xTimerReset(Timer500,0);
+//
+//					if (InStabilityFlag == 1) {
+//						LoadShed();
+//					} else {
+//						LoadConnect();
+//					}
+//				}
+//
+//
+//			}
+//		}
+//	}
+//}
 
 static void timer500Callback() {
 
@@ -183,24 +177,6 @@ static void WallSwitchPoll(void *pvParameters) {
 // Sends frequency information to the VGA Display Task
 void StabilityControlCheck(void *pvParameters)
 {
-// TEST CODE
-//	unsigned int temp = 0;
-//
-//	while(1)
-//	{
-//		if (xQueueReceive(newFreqQ, &temp, portMAX_DELAY) == pdTRUE)
-//		{
-//			printf("Received ADC count of %d\n", temp);
-//			usleep(50);
-//
-//			if (xQueueSend(vgaFreqQ, (void *)&temp, NULL) == pdTRUE)
-//			{
-//				printf("Sent ADC count of %d to VGA Task\n", temp);
-//				usleep(50);
-//			}
-//		}
-//	}
-
 	// Stores old frequency and ADC count for rate of change calculation
 	double oldFreq = 0;
 	unsigned int oldCount = 0;
@@ -212,14 +188,14 @@ void StabilityControlCheck(void *pvParameters)
 	// Buffers the queue data so old count can be saved
 	unsigned int temp = 0;
 
-	// Lowest frequency possible before system enters shedding mode
-	double lowerBound = 0;
-
 	// Local variable for rate of change
 	double rocLocal = 0;
 
+	// Lowest frequency possible before system enters shedding mode
+	double lowerBound = 48.5; // TODO: Change these by keyboard user input
+
 	// Max absolute rate of change before system enters shedding mode
-	double rocThreshold = 0;
+	double rocThreshold = 8; // TODO: Change these by keyboard user input
 
 	while(1)
 	{
@@ -248,39 +224,37 @@ void StabilityControlCheck(void *pvParameters)
 			xSemaphoreGive(roc_mutex);
 
 			// Send current frequency to VGA Display Task if queue isn't full
-			if (uxQueueSpacesAvailable(vgaFreqQ) == 0)
-			{
-				printf("VGA FREQ QUEUE FULL.\n");
-				usleep(50);
-			}
-			else
+			if (uxQueueSpacesAvailable(vgaFreqQ) != 0)
 			{
 				xQueueSend(vgaFreqQ, &newCount, 0);
 			}
 
 			// Check stable system for instability
-			// Take stability flag mutex
-			if () // System stable
+			xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY);
+			if (InStabilityFlag == 0)
 			{
-				// TODO: Check if current freq is under lower threshold OR rate of change too high
+				// Check if current freq is under lower threshold OR rate of change too high
 				if ((newFreq < lowerBound) || (rocLocal > rocThreshold))
 				{
-					// Take mutex
-					// Set the unstable flag
-					// Give mutex
+					InStabilityFlag = 1;
+//					printf("====================\n");
+//					printf("System swapping to UNSTABLE\nFrequency is %f Hz\nRate of change is %f Hz/s\n", newFreq, rocLocal);
+//					usleep(10);
 				}
 			}
 			// Check unstable system for stability
 			else
 			{
-				// TODO: Check if current freq is under lower threshold OR rate of change too high
+				// Check if current freq is under lower threshold OR rate of change too high
 				if ((newFreq >= lowerBound) && (rocLocal <= rocThreshold))
 				{
-					// Take mutex
-					// Remove the unstable flag
-					// Give mutex
+					InStabilityFlag = 0;
+//					printf("====================\n");
+//					printf("System swapping to STABLE\nFrequency is %f Hz\nRate of change is %f Hz/s\n", newFreq, rocLocal);
+//					usleep(10);
 				}
 			}
+			xSemaphoreGive(InStabilityFlag_mutex);
 
 //			// DEBUG PRINT
 //			printf("====================\n");
@@ -299,18 +273,6 @@ void StabilityControlCheck(void *pvParameters)
 // Receives frequency information, displays to VGA
 void VGADisplayTask(void *pvParameters)
 {
-//	TEST CODE
-//	unsigned int temp = 0;
-//
-//	while(1)
-//	{
-//		if (xQueueReceive(vgaFreqQ, &temp, portMAX_DELAY) == pdTRUE)
-//		{
-//			printf("Received ADC count of %d from StabControlCheck\n", temp);
-//			usleep(50);
-//		}
-//	}
-
 	// Stores latest ADC Count, frequency from StabilityControlChecker, and rate of change from global variable
 	unsigned int newCount = 0;
 	double newFreq = 0;
@@ -324,14 +286,15 @@ void VGADisplayTask(void *pvParameters)
 		if (xQueueReceive(vgaFreqQ, &newCount, portMAX_DELAY) == pdPASS)
 		{
 			newFreq = 16000/(double)newCount;
-			printf("VGA received new frequency of %f.\n", newFreq);
-			usleep(50);
+			//printf("VGA received new frequency of %f.\n", newFreq);
+			//usleep(10);
 
 			// Store global rate of change locally
 			xSemaphoreTake(roc_mutex, portMAX_DELAY);
 			roc_local = rateOfChange;
 			xSemaphoreGive(roc_mutex);
-			printf("Current rate of change is %f\n", roc_local);
+			//printf("Current rate of change is %f\n", roc_local);
+			//usleep(10);
 
 			// Send data to monitor
 			// TODO: All displaying info and shit here
@@ -347,12 +310,13 @@ int CreateTasks() {
 	return 0;
 }
 
-// Initialises all data structures used
-
+// Creates all timers used
 int CreateTimers() {
-	Timer500 = xTimerCreate("instablility Timer", 500, pdTRUE, NULL);
+	//Timer500 = xTimerCreate("instablility Timer", 500, pdTRUE, NULL);
+	return 0;
 }
 
+// Initialises all data structures used
 int OSDataInit() {
 	// Initialise Queues
 	newLoadQ = xQueueCreate( 100, sizeof(unsigned int) );
@@ -361,6 +325,7 @@ int OSDataInit() {
 
 	// Initialise mutexes
 	roc_mutex = xSemaphoreCreateMutex();
+	InStabilityFlag_mutex = xSemaphoreCreateMutex();
 	return 0;
 }
 
