@@ -42,6 +42,8 @@
 /*---------- GLOBAL VARIABLES ----------*/
 QueueHandle_t msgqueue;
 
+QueueHandle_t ControlQ;
+
 // used to delete a task
 TaskHandle_t xHandle;
 
@@ -58,10 +60,21 @@ QueueHandle_t vgaFreqQ;
 QueueHandle_t newFreqQ;
 
 // Mutex for protecting loadManageState flag
-SemaphoreHandle_t loadManageState_sem;
+SemaphoreHandle_t InStabilityFlag_sem;
+
+SemaphoreHandle_t TimerSync_sem;
 
 // Flag that represents if system is in shedding mode
-unsigned int loadManageState = 0;
+unsigned int InStabilityFlag = 0;
+
+unsigned int Timer500Full = 0;
+
+unsigned int loadManageState;
+
+unsigned int MaintanenceModeFlag;
+
+TimerHandle_t Timer500;
+
 
 // Global double stores current rate of change
 double rateOfChange = 0;
@@ -90,6 +103,55 @@ void freq_relay(){
 
 /*---------- FUNCTION DEFINITIONS ----------*/
 
+
+static void load_manage(void *pvParameters) {
+
+	int previousStabilitystate;
+	// Flag for shedding
+	bool loadShedStatus;
+	//flag for monitor
+	bool monitorMode;
+
+	while(1) {
+
+		if (MaintanenceModeFlag == 0) {
+
+			if (xSemaphoreTake(InStabilityFlag_sem,portMAX_DELAY) == pdTRUE){
+
+				if (InStabilityFlag && !loadShedStatus) {
+					monitorMode = true;
+					loadShedStatus = true;
+					LoadShed();
+					xTimerStart(Timer500, 0);
+				}
+
+				else if (monitorMode && (previousStabilitystate != InStabilityFlag) ) {
+					xTimerReset(Timer500,0);
+					previousStabilitystate = InStabilityFlag;
+				} 
+
+				else if (monitorMode && (Timer500Full == 1)) {
+
+					Timer500Full = 0;
+					xTimerReset(Timer500,0);
+
+					if (InStabilityFlag == 1) {
+						LoadShed();
+					} else {
+						LoadConnect();
+					} 
+				}
+
+
+			}
+		}
+	}
+}
+
+static void timer500Callback() {
+
+}
+
 static void WallSwitchPoll(void *pvParameters) {
 	unsigned int CurrSwitchValue = 0;
 	unsigned int PrevSwitchValue = 0;
@@ -111,6 +173,7 @@ static void WallSwitchPoll(void *pvParameters) {
     }
   vTaskDelay(100);
 
+  vTaskDelay(100);
   }
 
 }
@@ -285,6 +348,11 @@ int CreateTasks() {
 }
 
 // Initialises all data structures used
+
+int CreateTimers() {
+	Timer500 = xTimerCreate("instablility Timer", 500, pdTRUE, NULL);
+}
+
 int OSDataInit() {
 	// Initialise Queues
 	newLoadQ = xQueueCreate( 100, sizeof(unsigned int) );
