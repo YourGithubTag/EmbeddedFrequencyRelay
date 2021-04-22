@@ -60,12 +60,16 @@ QueueHandle_t newFreqQ;
 // Mutex for protecting loadManageState flag
 SemaphoreHandle_t InStabilityFlag_sem;
 
+SemaphoreHandle_t TimerSync_sem;
+
 // Flag that represents if system is in shedding mode
 unsigned int InStabilityFlag = 0;
 
 unsigned int Timer500Full = 0;
 
 unsigned int loadManageState;
+
+unsigned int MaintanenceModeFlag;
 
 TimerHandle_t Timer500;
 
@@ -96,42 +100,42 @@ static void load_manage(void *pvParameters) {
 
 	while(1) {
 
-		if (xSemaphoreTake(InStabilityFlag_sem,portMAX_DELAY) == pdTRUE){
+		if (MaintanenceModeFlag == 0) {
 
-			if (InStabilityFlag && !loadShedStatus) {
-				monitorMode = true;
-				loadShedStatus = true;
-				LoadShed();
-				xTimerStart(Timer500, 0);
-			}
+			if (xSemaphoreTake(InStabilityFlag_sem,portMAX_DELAY) == pdTRUE){
 
-			else if (monitorMode && (previousStabilitystate != InStabilityFlag) ) {
-				xTimerReset(Timer500,0);
-				previousStabilitystate = InStabilityFlag;
-
-			} 
-
-			else if (monitorMode && (Timer500Full == 1)) {
-
-				Timer500Full = 0;
-				xTimerReset(Timer500,0);
-
-				if (InStabilityFlag == 1) {
+				if (InStabilityFlag && !loadShedStatus) {
+					monitorMode = true;
+					loadShedStatus = true;
 					LoadShed();
-				} else {
-					LoadConnect();
+					xTimerStart(Timer500, 0);
 				}
 
-			}
+				else if (monitorMode && (previousStabilitystate != InStabilityFlag) ) {
+					xTimerReset(Timer500,0);
+					previousStabilitystate = InStabilityFlag;
+				} 
+
+				else if (monitorMode && (Timer500Full == 1)) {
+
+					Timer500Full = 0;
+					xTimerReset(Timer500,0);
+
+					if (InStabilityFlag == 1) {
+						LoadShed();
+					} else {
+						LoadConnect();
+					} 
+				}
+
 
 			}
+		}
 	}
-s
 }
 
 static void timer500Callback() {
 
-	Timer500Full = 1;
 }
 
 
