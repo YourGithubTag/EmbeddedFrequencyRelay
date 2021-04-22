@@ -97,6 +97,7 @@ static void WallSwitchPoll(void *pvParameters) {
     }
   vTaskDelay(100);
 
+  vTaskDelay(100);
   }
 
 }
