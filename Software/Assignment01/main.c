@@ -40,6 +40,8 @@
 /*---------- GLOBAL VARIABLES ----------*/
 QueueHandle_t msgqueue;
 
+QueueHandle_t ControlQ;
+
 // used to delete a task
 TaskHandle_t xHandle;
 
@@ -97,6 +99,7 @@ static void WallSwitchPoll(void *pvParameters) {
     }
   vTaskDelay(100);
 
+  vTaskDelay(100);
   }
 
 }
