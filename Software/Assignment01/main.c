@@ -58,10 +58,17 @@ QueueHandle_t vgaDisplayQ;
 QueueHandle_t newFreqQ;
 
 // Mutex for protecting loadManageState flag
-SemaphoreHandle_t loadManageState_sem;
+SemaphoreHandle_t InStabilityFlag_sem;
 
 // Flag that represents if system is in shedding mode
-unsigned int loadManageState = 0;
+unsigned int InStabilityFlag = 0;
+
+unsigned int Timer500Full = 0;
+
+unsigned int loadManageState;
+
+TimerHandle_t Timer500;
+
 
 /*---------- INTERRUPT SERVICE ROUTINES ----------*/
 // ISR for handling Frequency Relay Interrupt
@@ -77,6 +84,57 @@ void freq_relay(){
 
 	return;
 }
+
+
+static void load_manage(void *pvParameters) {
+
+	int previousStabilitystate;
+	// Flag for shedding
+	bool loadShedStatus;
+	//flag for monitor
+	bool monitorMode;
+
+	while(1) {
+
+		if (xSemaphoreTake(InStabilityFlag_sem,portMAX_DELAY) == pdTRUE){
+
+			if (InStabilityFlag && !loadShedStatus) {
+				monitorMode = true;
+				loadShedStatus = true;
+				LoadShed();
+				xTimerStart(Timer500, 0);
+			}
+
+			else if (monitorMode && (previousStabilitystate != InStabilityFlag) ) {
+				xTimerReset(Timer500,0);
+				previousStabilitystate = InStabilityFlag;
+
+			} 
+
+			else if (monitorMode && (Timer500Full == 1)) {
+
+				Timer500Full = 0;
+				xTimerReset(Timer500,0);
+
+				if (InStabilityFlag == 1) {
+					LoadShed();
+				} else {
+					LoadConnect();
+				}
+
+			}
+
+			}
+	}
+s
+}
+
+static void timer500Callback() {
+
+	Timer500Full = 1;
+}
+
+
 
 static void WallSwitchPoll(void *pvParameters) {
 	unsigned int CurrSwitchValue = 0;
@@ -161,6 +219,10 @@ int CreateTasks() {
 	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 2, NULL);
 	xTaskCreate(VGADisplayTask, "VGADisplay", TASK_STACKSIZE, NULL, 3, NULL);
 	return 0;
+}
+
+int CreateTimers() {
+	Timer500 = xTimerCreate("instablility Timer", 500, pdTRUE, NULL);
 }
 
 int OSDataInit() {
