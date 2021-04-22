@@ -40,6 +40,8 @@
 /*---------- GLOBAL VARIABLES ----------*/
 QueueHandle_t msgqueue;
 
+QueueHandle_t ControlQ;
+
 // used to delete a task
 TaskHandle_t xHandle;
 
