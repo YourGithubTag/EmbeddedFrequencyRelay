@@ -9,10 +9,10 @@
 #include <string.h>
 
 /* Scheduler includes. */
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
+#include "FreeRTOS/FreeRTOS.h"
+#include "FreeRTOS/task.h"
+#include "FreeRTOS/queue.h"
+#include "FreeRTOS/semphr.h"
 
 /* HAL API includes */
 #include "system.h"
@@ -49,7 +49,9 @@ TaskHandle_t xHandle;
 SemaphoreHandle_t shared_resource_sem;
 
 // globals variables
-QueueHandle_t newLoadQ ;
+QueueHandle_t SwitchQ;
+
+QueueHandle_t LEDQ;
 
 // Queue for communication between StabilityControlCheck & VGADisplayTask
 QueueHandle_t vgaDisplayQ;
@@ -71,7 +73,12 @@ unsigned int loadManageState;
 
 unsigned int MaintanenceModeFlag;
 
-TimerHandle_t Timer500;
+
+typedef struct LEDstatus {
+	unsigned int Red;
+	unsigned int Green;
+	
+} LEDStruct;
 
 
 /*---------- INTERRUPT SERVICE ROUTINES ----------*/
@@ -94,12 +101,31 @@ static void load_manage(void *pvParameters) {
 
 	int previousStabilitystate;
 	// Flag for shedding
-	bool loadShedStatus;
+	int loadShedStatus;
 	//flag for monitor
-	bool monitorMode;
+	int monitorMode;
+
+	LEDStruct Led2Send;
+
+	unsigned int switchNum;
 
 	while(1) {
 
+		if (xQueueReceive(SwitchQ, &switchNum, portMAX_DELAY) == pdTRUE) {
+			if (switchNum >= 64) {
+				Led2Send.Red = switchNum;
+				Led2Send.Green = switchNum;
+			} else {
+				Led2Send.Red = switchNum;
+				Led2Send.Green = 0;
+			}
+
+			if (xQueueSend(LEDQ,&Led2Send,10) != pdTRUE) {
+				printf("FUCK couldnt send to Leds \n ");
+			} 
+		}
+		
+/*
 		if (MaintanenceModeFlag == 0) {
 
 			if (xSemaphoreTake(InStabilityFlag_sem,portMAX_DELAY) == pdTRUE){
@@ -131,37 +157,60 @@ static void load_manage(void *pvParameters) {
 
 			}
 		}
+		*/
 	}
 }
 
-static void timer500Callback() {
+static void LEDcontrol(void *pvParameters) {
+	LEDStruct Temp;
 
+	while (1) {
+		if (xQueueReceive(LEDQ, &Temp, portMAX_DELAY) == pdTRUE) {
+
+			IOWR_ALTERA_AVALON_PIO_DATA(RED_LEDS_BASE, Temp.Red);
+			IOWR_ALTERA_AVALON_PIO_DATA(GREEN_LEDS_BASE, Temp.Green);
+
+		} else {
+			printf("Dead \n");
+		}
+
+	}
 }
 
-
-
 static void WallSwitchPoll(void *pvParameters) {
+
 	unsigned int CurrSwitchValue = 0;
 	unsigned int PrevSwitchValue = 0;
-	unsigned int temp = 100;
+	unsigned int temp = 0;
+	printf("WALL SWITCH \n");
+
+	CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
+		if (xQueueSend(SwitchQ, &CurrSwitchValue, 10) !=pdTRUE) {
+			printf("failed INIT switch send \n");
+		}
 
   while (1){
-	  
-    // read the value of the switch
-    CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
+   		 
+		if (!MaintanenceModeFlag) {
 
-    if (CurrSwitchValue != PrevSwitchValue ) {
-        
-        if (xQueueSend(newLoadQ, &CurrSwitchValue, 10) == pdTRUE) {
-			xQueueReceive(newLoadQ, &temp, portMAX_DELAY);
-        	printf("%d \n", temp);
-        } else {
-            printf("failed send \n");
-        }
-    }
-  vTaskDelay(100);
+			CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
+			
+			if (loadManageState && (CurrSwitchValue < PrevSwitchValue)) {
+				if (xQueueSend(SwitchQ, &CurrSwitchValue, 10) != pdTRUE) {
+						printf("failed to send");
+					}
+			} else {
+				if (CurrSwitchValue != PrevSwitchValue ) {
+					if (xQueueSend(SwitchQ, &CurrSwitchValue, 10) != pdTRUE) {
+						printf("failed to send");
+					} 
+				}
+			}
 
-  vTaskDelay(100);
+			PrevSwitchValue = CurrSwitchValue;
+		}
+
+  vTaskDelay(10);
   }
 
 }
@@ -218,20 +267,24 @@ void VGADisplayTask(void *pvParameters)
 	}
 }
 
+int CreateSemaphores() {
+	TimerSync_sem = xSemaphoreCreateBinary();
+}
+
 int CreateTasks() {
 	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
 	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 2, NULL);
-	xTaskCreate(VGADisplayTask, "VGADisplay", TASK_STACKSIZE, NULL, 3, NULL);
+	//xTaskCreate(VGADisplayTask, "VGADisplay", TASK_STACKSIZE, NULL, 3, NULL);
+	xTaskCreate(load_manage,"LDM",TASK_STACKSIZE,NULL,4,NULL);
+	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,3,NULL);
 	return 0;
 }
 
-int CreateTimers() {
-	Timer500 = xTimerCreate("instablility Timer", 500, pdTRUE, NULL);
-}
 
 int OSDataInit() {
-	newLoadQ = xQueueCreate( 100, sizeof(unsigned int) );
+	SwitchQ = xQueueCreate( 100, sizeof(unsigned int) );
 	newFreqQ = xQueueCreate(10, sizeof( void* ));
+	LEDQ = xQueueCreate(100, sizeof(LEDStruct));
 	vgaDisplayQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 	return 0;
 }
