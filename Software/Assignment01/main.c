@@ -76,7 +76,11 @@ unsigned int Timer500Full = 0;
 
 unsigned int loadManageState;
 
-unsigned int MaintanenceModeFlag;
+// Mutex for protecting maintenance mode flag
+SemaphoreHandle_t maintenanceModeFlag_mutex;
+
+// System flag for if we are in maintenance mode
+unsigned int maintenanceModeFlag;
 
 
 typedef struct LEDstatus {
@@ -90,6 +94,21 @@ double rateOfChange = 0;
 
 // Mutex to protect rate of change global variable
 SemaphoreHandle_t roc_mutex;
+
+// Queue for communication between keyboard ISR and keyboard reader
+QueueHandle_t keyboardQ;
+
+// Lower frequency bound
+double lowerFreqBound = 0;
+
+// Mutex for protecting lower frequency bound
+SemaphoreHandle_t lowerFreqBound_mutex;
+
+// Absolute rate of change bound
+double rocBound = 0;
+
+// Mutex for protecting rate of change bound
+SemaphoreHandle_t rocBound_mutex;
 
 /*---------- INTERRUPT SERVICE ROUTINES ----------*/
 // ISR for handling Frequency Relay Interrupt
@@ -116,31 +135,55 @@ void ps2_isr (void* context, alt_u32 id)
 
 	status = decode_scancode (context, &decode_mode , &key , &ascii) ;
 
-	if ( status == 0 ) //success
+	// Display key on seven seg display
+	IOWR(SEVEN_SEG_BASE, 0,key);
+
+	// Create local copy of maintenanceModeFlag
+	xSemaphoreTakeFromISR(maintenanceModeFlag_mutex, NULL);
+	unsigned int maintModeFlag_local = 1; //maintenanceModeFlag TODO: Change back
+	xSemaphoreGiveFromISR(maintenanceModeFlag_mutex, NULL);
+
+	// If key is pressed & maintenance mode
+	if ((status == 0 ) && (maintModeFlag_local))
 	{
-		printf("====================\n");
-		// print out the result
+		// Print out the result
 		switch ( decode_mode )
 		{
+			// If the key pressed is ASCII attempt to send through queue
 			case KB_ASCII_MAKE_CODE :
-				printf ( "ASCII   : %x\n", key ) ;
+//				printf ( "ASCII: %x\n", key ) ;
+//				usleep(10);
+				if(xQueueIsQueueFullFromISR(keyboardQ) == pdFALSE)
+				{
+					xQueueSendFromISR(keyboardQ, &ascii, NULL);
+//					printf ("SENT ASCII.\n") ;
+//					usleep(10);
+				}
 				break ;
-			case KB_LONG_BINARY_MAKE_CODE :
-				// do nothing
+
+			// If key pressed is make code then send
 			case KB_BINARY_MAKE_CODE :
-				printf ( "MAKE CODE : %x\n", key ) ;
+//				printf ( "MAKE CODE : %x\n", key ) ;
+//				usleep(10);
+				if(xQueueIsQueueFullFromISR(keyboardQ) == pdFALSE)
+				{
+					xQueueSendFromISR(keyboardQ, &key, NULL);
+//					printf ("SENT MAKE CODE.\n") ;
+//					usleep(10);
+				}
 				break ;
-			case KB_BREAK_CODE :
-				// do nothing
-			default :
-				printf ( "DEFAULT   : %x\n", key ) ;
+
+
+			// Otherwise do not send
+			default:
+//				printf ( "NON-ASCII: %x\n", key ) ;
+//				usleep(10);
 				break ;
 		}
-		IOWR(SEVEN_SEG_BASE,0 ,key);
 	}
 }
 
-/*---------- FUNCTION DEFINITIONS ----------*/
+/*---------- TASK DEFINITIONS ----------*/
 
 static void load_manage(void *pvParameters) {
 
@@ -170,7 +213,9 @@ static void load_manage(void *pvParameters) {
 			} 
 		}
 		
-/*
+/*	//Take
+ * 	//Write to local
+ * 	//Return
 		if (MaintanenceModeFlag == 0) {
 
 			if (xSemaphoreTake(InStabilityFlag_sem,portMAX_DELAY) == pdTRUE){
@@ -236,7 +281,7 @@ static void WallSwitchPoll(void *pvParameters) {
 
   while (1){
    		 
-		if (!MaintanenceModeFlag) {
+		if (!maintenanceModeFlag) {
 
 			CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
 			
@@ -325,9 +370,9 @@ void StabilityControlCheck(void *pvParameters)
 				if ((newFreq < lowerBound) || (rocLocal > rocThreshold))
 				{
 					InStabilityFlag = 1;
-					printf("====================\n");
-					printf("System swapping to UNSTABLE\nFrequency is %f Hz\nRate of change is %f Hz/s\n", newFreq, rocLocal);
-					usleep(10);
+//					printf("====================\n");
+//					printf("System swapping to UNSTABLE\nFrequency is %f Hz\nRate of change is %f Hz/s\n", newFreq, rocLocal);
+//					usleep(10);
 				}
 			}
 			// Check unstable system for stability
@@ -337,9 +382,9 @@ void StabilityControlCheck(void *pvParameters)
 				if ((newFreq >= lowerBound) && (rocLocal <= rocThreshold))
 				{
 					InStabilityFlag = 0;
-					printf("====================\n");
-					printf("System swapping to STABLE\nFrequency is %f Hz\nRate of change is %f Hz/s\n", newFreq, rocLocal);
-					usleep(10);
+//					printf("====================\n");
+//					printf("System swapping to STABLE\nFrequency is %f Hz\nRate of change is %f Hz/s\n", newFreq, rocLocal);
+//					usleep(10);
 				}
 			}
 			xSemaphoreGive(InStabilityFlag_mutex);
@@ -379,11 +424,53 @@ void VGADisplayTask(void *pvParameters)
 }
 
 // Reads the keyboard input and updates thresholds for rate of change and lower frequency if in maintenance mode
-int KeyboardReader()
+void KeyboardReader(void *pvParamaters)
 {
-	//
-	return 0;
+	// newKey holds current key from ps2_isr
+	unsigned int newKey = 0;
+
+	// currentInput array stores all keys previously pressed for current parameter (lowerFreqBound, rocBound)
+	unsigned int currentInput[4];
+
+	// Flag represents which parameter is currently pending change, 0 = lowerFreqBound, 1 = rocBound)
+	unsigned int whichBoundFlag = 0;
+
+	while(1)
+	{
+		// Receive keys from ISR
+		if (xQueueReceive(keyboardQ, &newKey, portMAX_DELAY) == pdTRUE)
+		{
+			// Bitmask to keep lower 8 bits of newKey
+			newKey = newKey & 0xFF;
+
+			// Check if a digit 0-9 inclusive
+			if ((newKey <= 57) && (newKey >= 48))
+			{
+				// TODO: Switch statement for all different digits
+			}
+			// Check for period .
+			else if (newKey == 46)
+			{
+				// TODO: Add a period to the array
+			}
+			// Check if SPACEBAR
+			else if (newKey == 41)
+			{
+				// TODO: Change the parameter flag and set whichever bound is currently active
+			}
+
+
+//			printf("==========\n");
+//			printf("DECIMAL: %d.\n", newKey);
+//			printf("HEX: %x.\n", newKey);
+//			usleep(10);
+		}
+	}
+
+	return;
 }
+
+/*---------- FUNCTION DEFINITIONS ----------*/
 
 // Creates all tasks used
 int CreateTasks() {
@@ -392,6 +479,7 @@ int CreateTasks() {
 	xTaskCreate(VGADisplayTask, "VGADisplay", TASK_STACKSIZE, NULL, 3, NULL);
 	xTaskCreate(load_manage,"LDM",TASK_STACKSIZE,NULL,4,NULL);
 	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,5,NULL);
+	xTaskCreate(KeyboardReader, "KeyboardReader", TASK_STACKSIZE, NULL, 6, NULL);
 	return 0;
 }
 
@@ -408,10 +496,15 @@ int OSDataInit() {
 	newFreqQ = xQueueCreate(10, sizeof( void* ));
 	LEDQ = xQueueCreate(100, sizeof(LEDStruct));
 	vgaFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
+	keyboardQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 
 	// Initialise mutexes
 	roc_mutex = xSemaphoreCreateMutex();
 	InStabilityFlag_mutex = xSemaphoreCreateMutex();
+	maintenanceModeFlag_mutex = xSemaphoreCreateMutex();
+	lowerFreqBound_mutex = xSemaphoreCreateMutex();
+	rocBound_mutex = xSemaphoreCreateMutex();
+
 	return 0;
 }
 
