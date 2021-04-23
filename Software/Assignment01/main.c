@@ -71,9 +71,9 @@ unsigned int InStabilityFlag = 0;
 
 unsigned int Timer500Full = 0;
 
-unsigned int loadManageState;
+unsigned int loadManageState = 0;
 
-unsigned int MaintanenceModeFlag;
+unsigned int MaintanenceModeFlag = 0;
 
 
 typedef struct LEDstatus {
@@ -209,7 +209,7 @@ static void WallSwitchPoll(void *pvParameters) {
 			CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
 			
 			if (loadManageState && (CurrSwitchValue < PrevSwitchValue)) {
-				if (xQueueSend(SwitchQ, &CurrSwitchValue, 10) != pdTRUE) {
+				if (xQueueSend(SwitchQ, &CurrSwitchValue, 10) <= pdTRUE) {
 						printf("failed to send");
 					}
 			} else {
@@ -227,6 +227,8 @@ static void WallSwitchPoll(void *pvParameters) {
   }
 
 }
+
+/*
 
 // Checks the newFreqQ for new frequencies, calculates rate of change
 // Updates the loadManageState flag if the system needs to enter shedding mode
@@ -273,13 +275,13 @@ void StabilityControlCheck(void *pvParameters)
 
 	while(1)
 	{
-		/* THRESHOLD VALUE CHECK */
+		// THRESHOLD VALUE CHECK 
 		// Keyboard logic
 		// Chekc keyboard queue
 		// Take in inputs
 		// Change the lower bound and rate of change threshold
 
-		/* SYSTEM STABILITY CHECK */
+		//SYSTEM STABILITY CHECK 
 		// Wait for new frequency in queue
 		if (xQueueReceive(newFreqQ, &temp, portMAX_DELAY) == pdTRUE)
 		{
@@ -345,7 +347,8 @@ void StabilityControlCheck(void *pvParameters)
 	}
 
 }
-
+*/
+ /*
 // Receives frequency information, displays to VGA
 void VGADisplayTask(void *pvParameters)
 {
@@ -388,11 +391,12 @@ void VGADisplayTask(void *pvParameters)
 		}
 	}
 }
+*/
 
 // Creates all tasks used
 int CreateTasks() {
 	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
-	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 2, NULL);
+	//xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 2, NULL);
 	//xTaskCreate(VGADisplayTask, "VGADisplay", TASK_STACKSIZE, NULL, 3, NULL);
 	xTaskCreate(load_manage,"LDM",TASK_STACKSIZE,NULL,4,NULL);
 	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,3,NULL);
@@ -401,23 +405,24 @@ int CreateTasks() {
 
 // Initialises all data structures used
 
-int CreateTimers() {
-	Timer500 = xTimerCreate("instablility Timer", 500, pdTRUE, NULL);
-}
-
 int OSDataInit() {
 	SwitchQ = xQueueCreate( 100, sizeof(unsigned int) );
-	newFreqQ = xQueueCreate(10, sizeof( void* ));
+	//newFreqQ = xQueueCreate(10, sizeof( void* ));
 	LEDQ = xQueueCreate(100, sizeof(LEDStruct));
-	vgaDisplayQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
+	//vgaDisplayQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 	// Initialise Queues
-	newLoadQ = xQueueCreate( 100, sizeof(unsigned int) );
-	newFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
-	vgaFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
+	//newLoadQ = xQueueCreate( 100, sizeof(unsigned int) );
+	//newFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
+	//vgaFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 
 	// Initialise mutexes
 	roc_mutex = xSemaphoreCreateMutex();
 	return 0;
+}
+
+static void flaginit() {
+
+
 }
 
 // Initialise all ISRs
