@@ -22,6 +22,8 @@
 #include "io.h"
 #include "altera_avalon_pio_regs.h"
 #include "unistd.h"
+#include "altera_up_avalon_ps2.h"
+#include "altera_up_ps2_keyboard.h"
 
 
 /*---------- DEFINITIONS ----------*/
@@ -57,7 +59,7 @@ QueueHandle_t SwitchQ;
 QueueHandle_t LEDQ;
 
 // Queue for communication between StabilityControlCheck & VGADisplayTask
-QueueHandle_t vgaDisplayQ;
+QueueHandle_t vgaFreqQ;
 
 // Queue for communication between FreqAnalyserISR & StabilityControlCheck
 QueueHandle_t newFreqQ;
@@ -101,6 +103,41 @@ void freq_relay(){
 		xQueueSendFromISR(newFreqQ, (void *)&adcCount, NULL);
 	}
 	return;
+}
+
+// ISR for handling PS/2 keyboard presses
+void ps2_isr (void* context, alt_u32 id)
+{
+
+	char ascii;
+	int status = 0;
+	unsigned char key = 0;
+	KB_CODE_TYPE decode_mode;
+
+	status = decode_scancode (context, &decode_mode , &key , &ascii) ;
+
+	if ( status == 0 ) //success
+	{
+		printf("====================\n");
+		// print out the result
+		switch ( decode_mode )
+		{
+			case KB_ASCII_MAKE_CODE :
+				printf ( "ASCII   : %x\n", key ) ;
+				break ;
+			case KB_LONG_BINARY_MAKE_CODE :
+				// do nothing
+			case KB_BINARY_MAKE_CODE :
+				printf ( "MAKE CODE : %x\n", key ) ;
+				break ;
+			case KB_BREAK_CODE :
+				// do nothing
+			default :
+				printf ( "DEFAULT   : %x\n", key ) ;
+				break ;
+		}
+		IOWR(SEVEN_SEG_BASE,0 ,key);
+	}
 }
 
 /*---------- FUNCTION DEFINITIONS ----------*/
@@ -218,7 +255,7 @@ static void WallSwitchPoll(void *pvParameters) {
 			PrevSwitchValue = CurrSwitchValue;
 		}
 
-  vTaskDelay(10);
+  //vTaskDelay(10);
   }
 
 }
@@ -288,9 +325,9 @@ void StabilityControlCheck(void *pvParameters)
 				if ((newFreq < lowerBound) || (rocLocal > rocThreshold))
 				{
 					InStabilityFlag = 1;
-//					printf("====================\n");
-//					printf("System swapping to UNSTABLE\nFrequency is %f Hz\nRate of change is %f Hz/s\n", newFreq, rocLocal);
-//					usleep(10);
+					printf("====================\n");
+					printf("System swapping to UNSTABLE\nFrequency is %f Hz\nRate of change is %f Hz/s\n", newFreq, rocLocal);
+					usleep(10);
 				}
 			}
 			// Check unstable system for stability
@@ -300,21 +337,12 @@ void StabilityControlCheck(void *pvParameters)
 				if ((newFreq >= lowerBound) && (rocLocal <= rocThreshold))
 				{
 					InStabilityFlag = 0;
-//					printf("====================\n");
-//					printf("System swapping to STABLE\nFrequency is %f Hz\nRate of change is %f Hz/s\n", newFreq, rocLocal);
-//					usleep(10);
+					printf("====================\n");
+					printf("System swapping to STABLE\nFrequency is %f Hz\nRate of change is %f Hz/s\n", newFreq, rocLocal);
+					usleep(10);
 				}
 			}
 			xSemaphoreGive(InStabilityFlag_mutex);
-
-//			// DEBUG PRINT
-//			printf("====================\n");
-//			printf("Old freq = %f.\n", oldFreq);
-//			printf("Old count = %d.\n", oldCount);
-//			printf("New freq = %f.\n", newFreq);
-//			printf("New count = %d.\n", newCount);
-//			printf("Absolute Rate of change = %f.\n", rateOfChange);
-//			usleep(100);
 
 		}
 	}
@@ -336,16 +364,13 @@ void VGADisplayTask(void *pvParameters)
 		// Receive new ADC Count
 		if (xQueueReceive(vgaFreqQ, &newCount, portMAX_DELAY) == pdPASS)
 		{
+			// Calculate current frequency of system
 			newFreq = 16000/(double)newCount;
-			//printf("VGA received new frequency of %f.\n", newFreq);
-			//usleep(10);
 
 			// Store global rate of change locally
 			xSemaphoreTake(roc_mutex, portMAX_DELAY);
 			roc_local = rateOfChange;
 			xSemaphoreGive(roc_mutex);
-			//printf("Current rate of change is %f\n", roc_local);
-			//usleep(10);
 
 			// Send data to monitor
 			// TODO: All displaying info and shit here
@@ -353,13 +378,20 @@ void VGADisplayTask(void *pvParameters)
 	}
 }
 
+// Reads the keyboard input and updates thresholds for rate of change and lower frequency if in maintenance mode
+int KeyboardReader()
+{
+	//
+	return 0;
+}
+
 // Creates all tasks used
 int CreateTasks() {
 	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
 	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 2, NULL);
-	//xTaskCreate(VGADisplayTask, "VGADisplay", TASK_STACKSIZE, NULL, 3, NULL);
+	xTaskCreate(VGADisplayTask, "VGADisplay", TASK_STACKSIZE, NULL, 3, NULL);
 	xTaskCreate(load_manage,"LDM",TASK_STACKSIZE,NULL,4,NULL);
-	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,3,NULL);
+	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,5,NULL);
 	return 0;
 }
 
@@ -371,25 +403,15 @@ int CreateTimers() {
 
 // Initialises all data structures used
 int OSDataInit() {
+	// Initialise qeueues
 	SwitchQ = xQueueCreate( 100, sizeof(unsigned int) );
 	newFreqQ = xQueueCreate(10, sizeof( void* ));
 	LEDQ = xQueueCreate(100, sizeof(LEDStruct));
-	vgaDisplayQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
-	// Initialise Queues
-	newLoadQ = xQueueCreate( 100, sizeof(unsigned int) );
-	newFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 	vgaFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 
 	// Initialise mutexes
 	roc_mutex = xSemaphoreCreateMutex();
 	InStabilityFlag_mutex = xSemaphoreCreateMutex();
-	return 0;
-}
-
-// Initialise all ISRs
-int initISR()
-{
-	alt_irq_register(FREQUENCY_ANALYSER_IRQ, 0, freq_relay);
 	return 0;
 }
 
@@ -403,8 +425,21 @@ int main(int argc, char* argv[], char* envp[])
 	// Create all tasks
 	CreateTasks();
 
-	// Register all ISRs
-	initISR();
+	// Initialise PS2 device
+	alt_up_ps2_dev * ps2_device = alt_up_ps2_open_dev(PS2_NAME);
+
+	// Check if PS2 device connected
+	if(ps2_device == NULL){
+		printf("can't find PS/2 device\n");
+	}
+
+	// Register PS2 ISR
+	alt_up_ps2_clear_fifo(ps2_device);
+	alt_irq_register(PS2_IRQ, ps2_device, ps2_isr);
+	IOWR_8DIRECT(PS2_BASE,4,1);
+
+	// Register Frequency Analyser ISR
+	alt_irq_register(FREQUENCY_ANALYSER_IRQ, 0, freq_relay);
 
 	// Start Scheduler
 	vTaskStartScheduler();
