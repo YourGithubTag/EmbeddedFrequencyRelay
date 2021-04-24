@@ -53,6 +53,8 @@ TaskHandle_t xHandle;
 // Definition of Semaphore
 SemaphoreHandle_t shared_resource_sem;
 
+SempahoreHandle_t TimerTaskSync;
+
 // globals variables
 QueueHandle_t SwitchQ;
 
@@ -89,6 +91,8 @@ typedef struct LEDstatus {
 	
 } LEDStruct;
 
+
+
 // Global double stores current rate of change
 double rateOfChange = 0;
 
@@ -110,6 +114,14 @@ double rocBound = 0;
 // Mutex for protecting rate of change bound
 SemaphoreHandle_t rocBound_mutex;
 
+TimerHandle_t MonitoringTimer;
+
+SemaphoreHandle_t MonitorTimer_sem;
+
+SemaphoreHandle_t SystemState_mutex;
+
+LEDStruct SystemState;
+
 /*---------- INTERRUPT SERVICE ROUTINES ----------*/
 // ISR for handling Frequency Relay Interrupt
 void freq_relay(){
@@ -124,9 +136,12 @@ void freq_relay(){
 	return;
 }
 
+void vMonitoringTimerCallback(xTimerHandle_t timer) {
+	xSemaphoreGive(MonitorTimer_sem,NULL);
+}
+
 // ISR for handling PS/2 keyboard presses
-void ps2_isr (void* context, alt_u32 id)
-{
+void ps2_isr (void* context, alt_u32 id){
 
 	char ascii;
 	int status = 0;
@@ -251,6 +266,51 @@ static void load_manage(void *pvParameters) {
 	}
 }
 
+static void shedLogic(void *pvParameters) {
+
+	unsigned int PrevInstabilityFlag;
+	// Flag for shedding
+	int loadShedStatus;
+	//flag for monitor
+	int monitorMode;
+
+	LEDStruct Led2Send;
+
+if (xSemaphoreTake(maintenanceModeFlag_mutex) == pdTRUE) {
+	if (!maintenanceModeFlag) {
+
+	if (xSemaphoreTake(MonitorTimer_sem)) {
+		if (xSemaphoreTake(InStabilityFlag_mutex) == pdTRUE) {
+				if (InStabilityFlag) {
+					 LoadShed();
+				}
+				else {
+					 LoadConnect();
+				}
+			}
+		}
+	}
+}
+}
+
+static void MonitorTimer(void *pvParameters) {
+	unsigned int PrevInstabilityFlag;
+
+	if ( xSemaphoreTake(MonitorMode_sem) == pdTRUE && monitorMode) {
+		if ( xSemaphoreTake(InStabilityFlag_mutex) == pdTRUE) {
+
+		 if (PrevInstabilityFlag != InStabilityFlag ) {
+				if (xTimerReset(MonitoringTimer) == pdTRUE) {
+					PrevInstabilityFlag = InStabilityFlag;
+				} else {
+					printf("Timer cannot be reset");
+				}
+
+			}
+		}
+	}
+}
+
 static void LEDcontrol(void *pvParameters) {
 	LEDStruct Temp;
 
@@ -260,11 +320,63 @@ static void LEDcontrol(void *pvParameters) {
 			IOWR_ALTERA_AVALON_PIO_DATA(RED_LEDS_BASE, Temp.Red);
 			IOWR_ALTERA_AVALON_PIO_DATA(GREEN_LEDS_BASE, Temp.Green);
 
+			SystemState.Red = Temp.Red;
+			SystemState.Green = Temp.Green;
+
 		} else {
 			printf("Dead \n");
 		}
-
 	}
+}
+
+static void LoadConnect() {
+	LEDStruct temp;
+
+	temp.Green = SystemState.Green;
+	temp.Red = SystemState.Red;
+
+    if (!temp.Green) {
+        return 0;
+	}
+
+    unsigned int ret = 1;
+
+	// Start from bit 7 instead
+
+    while (temp.Green >>= 1) {
+        ret <<= 1;
+	}
+
+	temp.Green -= ret; 
+	temp.Red += ret;
+
+	if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
+		;
+	}
+	
+}
+
+static void LoadShed() {
+	LEDStruct temp;
+
+	temp.Green = SystemState.Green;
+	temp.Red = SystemState.Red;
+
+	 if (!temp.Red) {
+        return 0;
+	}
+	int num = 1;
+
+	while (temp.Red & num != 1){
+		num <<= 1;
+	}
+
+	temp.Red -= ret;
+	temp.Green += ret;
+
+	if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
+		;
+	} 
 }
 
 static void WallSwitchPoll(void *pvParameters) {
@@ -302,7 +414,6 @@ static void WallSwitchPoll(void *pvParameters) {
 
   //vTaskDelay(10);
   }
-
 }
 
 // Checks the newFreqQ for new frequencies, calculates rate of change
@@ -485,7 +596,7 @@ int CreateTasks() {
 
 // Creates all timers used
 int CreateTimers() {
-	//Timer500 = xTimerCreate("instablility Timer", 500, pdTRUE, NULL);
+	MonitoringTimer = xTimerCreate("MT", 500, pdTRUE, NULL , vMonitoringTimerCallback);
 	return 0;
 }
 
@@ -504,6 +615,8 @@ int OSDataInit() {
 	maintenanceModeFlag_mutex = xSemaphoreCreateMutex();
 	lowerFreqBound_mutex = xSemaphoreCreateMutex();
 	rocBound_mutex = xSemaphoreCreateMutex();
+	TimerTaskSync = xSemaphoreCreateBinary();
+	MonitorTimer_sem = xSemaphoreCreateBinary();
 
 	return 0;
 }
