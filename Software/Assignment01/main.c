@@ -219,70 +219,24 @@ void ps2_isr (void* context, alt_u32 id){
 
 /*---------- TASK DEFINITIONS ----------*/
 
-static void load_manage(void *pvParameters) {
+static void LoadManagement(void *pvParameters) {
 
-	int previousStabilitystate;
 
-	LEDStruct Led2Send;
 
-	unsigned int switchNum;
 
-	while(1) {
-
-		
-	}
 }
 
-static void ControlLogicNorm(void *pvParameters) {
-	unsigned int currInstabilityFlag;
-	unsigned int PrevInstabilityFlag;
-
-	unsigned int switchNum;
-	// Flag for shedding
-	int loadShedStatus = 0;
-
-	LEDStruct Led2Send;
-
-	if (xSemaphoreTake(ControlNorm_sem,portMAX_DELAY) == pdTRUE) {
-		if (xSemaphoreTake(maintenanceModeFlag_mutex) == pdTRUE) {
-			if (!maintenanceModeFlag) {
-				xSemaphoreGive(maintenanceModeFlag_mutex);
-
-				if (xSemaphoreTake(InStabilityFlag_sem,portMAX_DELAY) == pdTRUE){
-					currInstabilityFlag = InStabilityFlag;
-					xSemaphoreGive(InStabilityFlag_sem);
-					if (xSemaphoreTake(monitorMode_sem,portMAX_DELAY) == pdTRUE) {
-						if (!currInstabilityFlag && !monitorMode) {
-							if (xQueueReceive(SwitchQ, &switchNum, portMAX_DELAY) == pdTRUE) {
-								Led2Send.Red = switchNum;
-								Led2Send.Green = 0;
-								xQueueSend(LEDQ, &Led2Send);
-							}
-						}
-						} 
-						xSemaphoreGive(monitorMode_sem);
-				}
-				}
+static void switchMonitor(void *pvParameters) {
+	unsigned int temp;
+	if (monitorMode) {
+		if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
+			//Take Semaphore
+			if (temp < SystemState.Red) {
+				SystemState
 			}
 		}
 	}
-}
 
-static void ControlLogicManage (void *pvParamaters) {
-	if (xSemaphoreTake(ControlManage,portMAX_DELAY) == pdTRUE) {
-		if (currInstabilityFlag && !monitorMode) {
-			monitorMode = 1;
-			LoadShed();
-			xTimerStart(Timer500, 0);
-		} else if (monitorMode && (xSemaphoreTake(MonitorTimer_sem), portMAX_DELAY) == pdTRUE)) {
-			if (currInstabilityFlag) {
-				LoadShed();
-			}
-			else {
-				LoadConnect();
-			}
-		}
-	}
 }
 
 static void MonitorTimer(void *pvParameters) {
