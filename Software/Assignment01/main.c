@@ -2,6 +2,8 @@
 // Cecil Symes, Nikhil Kumar
 // csym531, nkmu576
 
+
+
 /*---------- INCLUDES ----------*/
 /* Standard includes. */
 #include <stddef.h>
@@ -26,6 +28,7 @@
 #include "altera_up_ps2_keyboard.h"
 
 
+
 /*---------- DEFINITIONS ----------*/
 // Definition of Task Stacks
 #define   TASK_STACKSIZE       2048
@@ -40,6 +43,7 @@
 
 // Definition of Message Queue
 #define   MSG_QUEUE_SIZE  30
+
 
 
 /*---------- GLOBAL VARIABLES ----------*/
@@ -80,7 +84,6 @@ unsigned int loadManageState;
 
 // Mutex for protecting maintenance mode flag
 SemaphoreHandle_t maintenanceModeFlag_mutex;
-
 // System flag for if we are in maintenance mode
 unsigned int maintenanceModeFlag;
 
@@ -94,7 +97,6 @@ typedef struct LEDstatus {
 
 // Global double stores current rate of change
 double rateOfChange = 0;
-
 // Mutex to protect rate of change global variable
 SemaphoreHandle_t roc_mutex;
 
@@ -102,16 +104,26 @@ SemaphoreHandle_t roc_mutex;
 QueueHandle_t keyboardQ;
 
 // Lower frequency bound
-double lowerFreqBound = 0;
-
+double lowerFreqBound = 0; // TODO: Choose a default lowerFreqBound
 // Mutex for protecting lower frequency bound
 SemaphoreHandle_t lowerFreqBound_mutex;
-
 // Absolute rate of change bound
-double rocBound = 0;
-
+double rocBound = 0; // TODO: Choose a default rocBound
 // Mutex for protecting rate of change bound
 SemaphoreHandle_t rocBound_mutex;
+/// whichBoundFlag represents which parameter is currently being edited, 0 = lowerFreqBound, 1 = rocBound)
+unsigned int whichBoundFlag = 0;
+// Mutex for protecting whichBoundFlag
+SemaphoreHandle_t whichBoundFlag_mutex;
+
+// Syncronisation semaphore between KeyboardChecker and LCDUpdater
+SemaphoreHandle_t lcdUpdate_sem;
+
+
+/*---------- FUNCTION DECLARATIONS ----------*/
+double array2double(unsigned int *newVal);
+
+
 
 TimerHandle_t MonitoringTimer;
 
@@ -202,6 +214,8 @@ void ps2_isr (void* context, alt_u32 id){
 		}
 	}
 }
+
+
 
 /*---------- TASK DEFINITIONS ----------*/
 
@@ -423,20 +437,13 @@ void StabilityControlCheck(void *pvParameters)
 	double rocLocal = 0;
 
 	// Lowest frequency possible before system enters shedding mode
-	double lowerBound = 48.5; // TODO: Change these by keyboard user input
+	double lowerFreqBound_local = 0;
 
 	// Max absolute rate of change before system enters shedding mode
-	double rocThreshold = 8; // TODO: Change these by keyboard user input
+	double rocBound_local = 0;
 
 	while(1)
 	{
-		/* THRESHOLD VALUE CHECK */
-		// Keyboard logic
-		// Chekc keyboard queue
-		// Take in inputs
-		// Change the lower bound and rate of change threshold
-
-		/* SYSTEM STABILITY CHECK */
 		// Wait for new frequency in queue
 		if (xQueueReceive(newFreqQ, &temp, portMAX_DELAY) == pdTRUE)
 		{
@@ -460,29 +467,32 @@ void StabilityControlCheck(void *pvParameters)
 				xQueueSend(vgaFreqQ, &newCount, 0);
 			}
 
+			// Obtain copies of global threshold values
+			xSemaphoreTake(lowerFreqBound_mutex, portMAX_DELAY);
+			lowerFreqBound_local = lowerFreqBound;
+			xSemaphoreGive(lowerFreqBound_mutex);
+
+			xSemaphoreTake(rocBound_mutex, portMAX_DELAY);
+			rocBound_local = rocBound;
+			xSemaphoreGive(rocBound_mutex);
+
 			// Check stable system for instability
 			xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY);
 			if (InStabilityFlag == 0)
 			{
 				// Check if current freq is under lower threshold OR rate of change too high
-				if ((newFreq < lowerBound) || (rocLocal > rocThreshold))
+				if ((newFreq < lowerFreqBound_local) || (rocLocal > rocBound_local))
 				{
 					InStabilityFlag = 1;
-//					printf("====================\n");
-//					printf("System swapping to UNSTABLE\nFrequency is %f Hz\nRate of change is %f Hz/s\n", newFreq, rocLocal);
-//					usleep(10);
 				}
 			}
 			// Check unstable system for stability
 			else
 			{
 				// Check if current freq is under lower threshold OR rate of change too high
-				if ((newFreq >= lowerBound) && (rocLocal <= rocThreshold))
+				if ((newFreq >= lowerFreqBound_local) && (rocLocal <= rocBound_local))
 				{
 					InStabilityFlag = 0;
-//					printf("====================\n");
-//					printf("System swapping to STABLE\nFrequency is %f Hz\nRate of change is %f Hz/s\n", newFreq, rocLocal);
-//					usleep(10);
 				}
 			}
 			xSemaphoreGive(InStabilityFlag_mutex);
@@ -527,11 +537,10 @@ void KeyboardReader(void *pvParamaters)
 	// newKey holds current key from ps2_isr
 	unsigned int newKey = 0;
 
-	// currentInput array stores all keys previously pressed for current parameter (lowerFreqBound, rocBound)
-	unsigned int currentInput[4];
-
-	// Flag represents which parameter is currently pending change, 0 = lowerFreqBound, 1 = rocBound)
-	unsigned int whichBoundFlag = 0;
+	// newValue stores the new value to be updated, digitIndex keeps track of which digit we are on
+	unsigned int newVal[4] = {0};
+	unsigned int digitIndex = 0;
+	double updateVal = 0;
 
 	while(1)
 	{
@@ -541,34 +550,242 @@ void KeyboardReader(void *pvParamaters)
 			// Bitmask to keep lower 8 bits of newKey
 			newKey = newKey & 0xFF;
 
-			// Check if a digit 0-9 inclusive
-			if ((newKey <= 57) && (newKey >= 48))
+			// Check if digit 0
+			if (newKey == 48)
 			{
-				// TODO: Switch statement for all different digits
+				// Add zero to corresponding index
+				newVal[digitIndex] = 0;
+				digitIndex++;
+			}
+			// Check if digit 1-9 inclusive
+			else if ((newKey > 48) && (newKey <= 57))
+			{
+				// Switch statement for all different digits
+				switch(newKey)
+				{
+					case 49:
+						newVal[digitIndex] = 1;
+						break;
+					case 50:
+						newVal[digitIndex] = 2;
+						break;
+					case 51:
+						newVal[digitIndex] = 3;
+						break;
+					case 52:
+						newVal[digitIndex] = 4;
+						break;
+					case 53:
+						newVal[digitIndex] = 5;
+						break;
+					case 54:
+						newVal[digitIndex] = 6;
+						break;
+					case 55:
+						newVal[digitIndex] = 7;
+						break;
+					case 56:
+						newVal[digitIndex] = 8;
+						break;
+					case 57:
+						newVal[digitIndex] = 9;
+						break;
+					default:
+						newVal[digitIndex] = 0;
+						break;
+				}
+				digitIndex++;
 			}
 			// Check for period .
 			else if (newKey == 46)
 			{
-				// TODO: Add a period to the array
+				newVal[digitIndex] = '.';
+				digitIndex++;
 			}
-			// Check if SPACEBAR
+			// Check for SPACE
 			else if (newKey == 41)
 			{
-				// TODO: Change the parameter flag and set whichever bound is currently active
+				newVal[digitIndex] = 41;
 			}
 
+			// Check if SPACEBAR or array is full (four slots full)
+			if ((newKey == 41) || (digitIndex == 4))
+			{
+				// Reset the currentInputIndex
+				digitIndex = 0;
 
-//			printf("==========\n");
-//			printf("DECIMAL: %d.\n", newKey);
-//			printf("HEX: %x.\n", newKey);
-//			usleep(10);
+				// Generate a double from the array
+				updateVal = array2double(newVal);
+
+				printf("Double generated: %f\n", updateVal);
+				usleep(10);
+
+				xSemaphoreTake(whichBoundFlag_mutex, portMAX_DELAY);
+
+				// Check what parameter is currently being edited
+				if (whichBoundFlag == 0)
+				{
+					xSemaphoreTake(lowerFreqBound_mutex, portMAX_DELAY);
+
+					// Currently editing lower freq bound
+					lowerFreqBound = updateVal;
+					whichBoundFlag = 1;
+
+					xSemaphoreGive(lowerFreqBound_mutex);
+				}
+				else
+				{
+					xSemaphoreTake(rocBound_mutex, portMAX_DELAY);
+
+					// Currently editing RoC bound
+					rocBound = updateVal;
+					whichBoundFlag = 0;
+
+					xSemaphoreGive(rocBound_mutex);
+				}
+
+				xSemaphoreGive(whichBoundFlag_mutex);
+
+				// Give sync semaphore so LCD can update
+				xSemaphoreGive(lcdUpdate_sem);
+
+				// Clear the array
+				for (int i = 0; i < 4; i++)
+				{
+					newVal[i] = 0;
+				}
+			}
+
 		}
 	}
 
 	return;
 }
 
+// Updates the LCD display with current lowerFreqBound and rocBound values, and indicates what is currently being edited in maintenance mode
+void LCDUpdater(void *pvParameters)
+{
+	// Local copy of whichBoundFlag
+	unsigned int whichBoundFlag_local = 0;
+
+	// Local copies of lowerFreqBound and rocBound
+	double lowerFreqBound_local = 0;
+	double rocBound_local = 0;
+
+	// Local copy of maintenanceModeFlag
+	unsigned int maintenanceModeFlag_local = 0;
+
+	// Pointer to the LCD
+	FILE *lcd;
+
+	while (1)
+	{
+		// Wait for semaphore indicating that a new value is ready
+		xSemaphoreTake(lcdUpdate_sem, portMAX_DELAY);
+
+		// Store local copy of whichBoundFlag
+		xSemaphoreTake(whichBoundFlag_mutex, portMAX_DELAY);
+		whichBoundFlag_local = whichBoundFlag;
+		xSemaphoreGive(whichBoundFlag_mutex);
+
+		// Store local copies of both bounds
+		xSemaphoreTake(lowerFreqBound_mutex, portMAX_DELAY);
+		lowerFreqBound_local = lowerFreqBound;
+		xSemaphoreGive(lowerFreqBound_mutex);
+
+		xSemaphoreTake(rocBound_mutex, portMAX_DELAY);
+		rocBound_local = rocBound;
+		xSemaphoreGive(rocBound_mutex);
+
+		// Store local copy of maintenanceModeFlag
+		xSemaphoreTake(maintenanceModeFlag_mutex, portMAX_DELAY);
+		maintenanceModeFlag_local = maintenanceModeFlag;
+		xSemaphoreGive(maintenanceModeFlag_mutex);
+
+		// Open the character LCD
+		lcd = fopen(CHARACTER_LCD_NAME, "w");
+
+		// If LCD opens successfully
+		if(lcd != NULL)
+		{
+			// Clear the screen
+			#define ESC 27
+			#define CLEAR_LCD_STRING "[2J"
+			fprintf(lcd, "%c%s", ESC, CLEAR_LCD_STRING);
+
+			// If maintenance mode, only write one
+			if (maintenanceModeFlag_local == 1)
+			{
+				// Editing RoC
+				if (whichBoundFlag_local == 1)
+				{
+					fprintf(lcd, "LowFreq: %.2f\n", lowerFreqBound_local);
+					fprintf(lcd, "Enter RoC...\n");
+				}
+				// Editing lowerFreqBound
+				else
+				{
+					fprintf(lcd, "RoC: %.2f\n", rocBound_local);
+					fprintf(lcd, "Enter LowFreq...\n");
+				}
+			}
+			// If normal mode write both to screen
+			else
+			{
+				fprintf(lcd, "LowFreq: %.2f\n", lowerFreqBound_local);
+				fprintf(lcd, "RoC: %.2f", rocBound_local);
+			}
+		}
+
+		fclose(lcd);
+	}
+}
+
+
 /*---------- FUNCTION DEFINITIONS ----------*/
+
+// Helper function that returns a double from a given array of size 4 containing unsigned ints
+double array2double(unsigned int *newVal)
+{
+	// Value to return
+	double updateVal = 0;
+
+	// Flag represents if we are currently assigning digits to the right of the decimal in updateVal
+	unsigned int decimalRightFlag = 0;
+
+	// tenthPwr determines how far right from decimal the current digit needs to go
+	unsigned int tenthPwr = 1;
+
+	for (int i = 0; i < 4; i++)
+	{
+		// If SPACE is detected then return array
+		if (newVal[i] == 41)
+		{
+			return updateVal;
+		}
+		// If current digit period then set decimalRightFlag, remaining digits in newVal need to be divided by powers of 10
+		else if (newVal[i] == 46)
+		{
+			decimalRightFlag = 1;
+		}
+		else
+		{
+			// Currently to right of decimal
+			if (decimalRightFlag == 1)
+			{
+				updateVal += (newVal[i] * pow(0.1, tenthPwr++));
+			}
+			// Currently to left of decimal
+			else
+			{
+				updateVal *= 10;
+				updateVal += newVal[i];
+			}
+		}
+	}
+
+	return updateVal;
+}
 
 // Creates all tasks used
 int CreateTasks() {
@@ -578,6 +795,7 @@ int CreateTasks() {
 	xTaskCreate(load_manage,"LDM",TASK_STACKSIZE,NULL,4,NULL);
 	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,5,NULL);
 	xTaskCreate(KeyboardReader, "KeyboardReader", TASK_STACKSIZE, NULL, 6, NULL);
+	xTaskCreate(LCDUpdater, "LCDUpdater", TASK_STACKSIZE, NULL, 7, NULL);
 	return 0;
 }
 
@@ -589,12 +807,15 @@ int CreateTimers() {
 
 // Initialises all data structures used
 int OSDataInit() {
-	// Initialise qeueues
+	// Initialise queues
 	SwitchQ = xQueueCreate( 100, sizeof(unsigned int) );
 	newFreqQ = xQueueCreate(10, sizeof( void* ));
 	LEDQ = xQueueCreate(100, sizeof(LEDStruct));
 	vgaFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 	keyboardQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
+
+	// Initialise Semaphores
+	lcdUpdate_sem = xSemaphoreCreateBinary();
 
 	// Initialise mutexes
 	roc_mutex = xSemaphoreCreateMutex();
@@ -602,6 +823,7 @@ int OSDataInit() {
 	maintenanceModeFlag_mutex = xSemaphoreCreateMutex();
 	lowerFreqBound_mutex = xSemaphoreCreateMutex();
 	rocBound_mutex = xSemaphoreCreateMutex();
+	whichBoundFlag_mutex = xSemaphoreCreateMutex();
 	TimerTaskSync = xSemaphoreCreateBinary();
 	MonitorTimer_sem = xSemaphoreCreateBinary();
 
