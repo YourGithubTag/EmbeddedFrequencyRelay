@@ -92,7 +92,6 @@ typedef struct LEDstatus {
 } LEDStruct;
 
 
-
 // Global double stores current rate of change
 double rateOfChange = 0;
 
@@ -121,6 +120,12 @@ SemaphoreHandle_t MonitorTimer_sem;
 SemaphoreHandle_t SystemState_mutex;
 
 LEDStruct SystemState;
+
+unsigned int SwitchState;
+
+unsigned int monitorMode;
+SemaphoreHandle_t MonitorMode_sem;
+
 
 /*---------- INTERRUPT SERVICE ROUTINES ----------*/
 // ISR for handling Frequency Relay Interrupt
@@ -203,10 +208,6 @@ void ps2_isr (void* context, alt_u32 id){
 static void load_manage(void *pvParameters) {
 
 	int previousStabilitystate;
-	// Flag for shedding
-	int loadShedStatus;
-	//flag for monitor
-	int monitorMode;
 
 	LEDStruct Led2Send;
 
@@ -214,98 +215,77 @@ static void load_manage(void *pvParameters) {
 
 	while(1) {
 
-		if (xQueueReceive(SwitchQ, &switchNum, portMAX_DELAY) == pdTRUE) {
-			if (switchNum >= 64) {
-				Led2Send.Red = switchNum;
-				Led2Send.Green = switchNum;
-			} else {
-				Led2Send.Red = switchNum;
-				Led2Send.Green = 0;
-			}
-
-			if (xQueueSend(LEDQ,&Led2Send,10) != pdTRUE) {
-				printf("FUCK couldnt send to Leds \n ");
-			} 
-		}
 		
-/*	//Take
- * 	//Write to local
- * 	//Return
-		if (MaintanenceModeFlag == 0) {
-
-			if (xSemaphoreTake(InStabilityFlag_sem,portMAX_DELAY) == pdTRUE){
-
-				if (InStabilityFlag && !loadShedStatus) {
-					monitorMode = true;
-					loadShedStatus = true;
-					LoadShed();
-					xTimerStart(Timer500, 0);
-				}
-
-				else if (monitorMode && (previousStabilitystate != InStabilityFlag) ) {
-					xTimerReset(Timer500,0);
-					previousStabilitystate = InStabilityFlag;
-				} 
-
-				else if (monitorMode && (Timer500Full == 1)) {
-
-					Timer500Full = 0;
-					xTimerReset(Timer500,0);
-
-					if (InStabilityFlag == 1) {
-						LoadShed();
-					} else {
-						LoadConnect();
-					} 
-				}
-
-
-			}
-		}
-		*/
 	}
 }
 
-static void shedLogic(void *pvParameters) {
-
+static void ControlLogicNorm(void *pvParameters) {
+	unsigned int currInstabilityFlag;
 	unsigned int PrevInstabilityFlag;
+
+	unsigned int switchNum;
 	// Flag for shedding
-	int loadShedStatus;
-	//flag for monitor
-	int monitorMode;
+	int loadShedStatus = 0;
 
 	LEDStruct Led2Send;
 
-if (xSemaphoreTake(maintenanceModeFlag_mutex) == pdTRUE) {
-	if (!maintenanceModeFlag) {
+	if (xSemaphoreTake(ControlNorm_sem,portMAX_DELAY) == pdTRUE) {
+		if (xSemaphoreTake(maintenanceModeFlag_mutex) == pdTRUE) {
+			if (!maintenanceModeFlag) {
+				xSemaphoreGive(maintenanceModeFlag_mutex);
 
-	if (xSemaphoreTake(MonitorTimer_sem)) {
-		if (xSemaphoreTake(InStabilityFlag_mutex) == pdTRUE) {
-				if (InStabilityFlag) {
-					 LoadShed();
+				if (xSemaphoreTake(InStabilityFlag_sem,portMAX_DELAY) == pdTRUE){
+					currInstabilityFlag = InStabilityFlag;
+					xSemaphoreGive(InStabilityFlag_sem);
+					if (xSemaphoreTake(monitorMode_sem,portMAX_DELAY) == pdTRUE) {
+						if (!currInstabilityFlag && !monitorMode) {
+							if (xQueueReceive(SwitchQ, &switchNum, portMAX_DELAY) == pdTRUE) {
+								Led2Send.Red = switchNum;
+								Led2Send.Green = 0;
+								xQueueSend(LEDQ, &Led2Send);
+							}
+						}
+						} 
+						xSemaphoreGive(monitorMode_sem);
 				}
-				else {
-					 LoadConnect();
 				}
 			}
 		}
 	}
 }
+
+static void ControlLogicManage (void *pvParamaters) {
+	if (xSemaphoreTake(ControlManage,portMAX_DELAY) == pdTRUE) {
+		if (currInstabilityFlag && !monitorMode) {
+			monitorMode = 1;
+			LoadShed();
+			xTimerStart(Timer500, 0);
+		} else if (monitorMode && (xSemaphoreTake(MonitorTimer_sem), portMAX_DELAY) == pdTRUE)) {
+			if (currInstabilityFlag) {
+				LoadShed();
+			}
+			else {
+				LoadConnect();
+			}
+		}
+	}
 }
 
 static void MonitorTimer(void *pvParameters) {
 	unsigned int PrevInstabilityFlag;
 
-	if ( xSemaphoreTake(MonitorMode_sem) == pdTRUE && monitorMode) {
+	if (xSemaphoreTake(MonitorMode_sem) == pdTRUE && monitorMode) {
+		xSemaphoreGive(MonitorMode_sem);
+
 		if ( xSemaphoreTake(InStabilityFlag_mutex) == pdTRUE) {
 
 		 if (PrevInstabilityFlag != InStabilityFlag ) {
+			 xSemaphoreGive(InStabilityFlag_mutex);
 				if (xTimerReset(MonitoringTimer) == pdTRUE) {
 					PrevInstabilityFlag = InStabilityFlag;
 				} else {
 					printf("Timer cannot be reset");
 				}
-
 			}
 		}
 	}
@@ -335,23 +315,29 @@ static void LoadConnect() {
 	temp.Green = SystemState.Green;
 	temp.Red = SystemState.Red;
 
+	//All Loads reconnected
     if (!temp.Green) {
-        return 0;
-	}
+       if (xSemaphoreTake(monitorMode_sem,portMAX_DELAY) == pdTRUE) {
+		   monitorMode = 0;
+	   }
 
-    unsigned int ret = 1;
+	} else {
 
-	// Start from bit 7 instead
+		unsigned int ret = 1;
 
-    while (temp.Green >>= 1) {
-        ret <<= 1;
-	}
+		// Start from bit 7 instead
 
-	temp.Green -= ret; 
-	temp.Red += ret;
+		while (temp.Green >>= 1) {
+			ret <<= 1;
+		}
 
-	if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
-		;
+		temp.Green -= ret; 
+		temp.Red += ret;
+
+		if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
+			;
+		}
+
 	}
 	
 }
@@ -363,20 +349,21 @@ static void LoadShed() {
 	temp.Red = SystemState.Red;
 
 	 if (!temp.Red) {
-        return 0;
+        return;
+	} else {
+		int num = 1;
+
+		while (temp.Red & num != 1){
+			num <<= 1;
+		}
+
+		temp.Red -= ret;
+		temp.Green += ret;
+
+		if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
+			;
+		} 
 	}
-	int num = 1;
-
-	while (temp.Red & num != 1){
-		num <<= 1;
-	}
-
-	temp.Red -= ret;
-	temp.Green += ret;
-
-	if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
-		;
-	} 
 }
 
 static void WallSwitchPoll(void *pvParameters) {
@@ -397,7 +384,7 @@ static void WallSwitchPoll(void *pvParameters) {
 
 			CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
 			
-			if (loadManageState && (CurrSwitchValue < PrevSwitchValue)) {
+			if (monitorMode && (CurrSwitchValue < PrevSwitchValue)) {
 				if (xQueueSend(SwitchQ, &CurrSwitchValue, 10) != pdTRUE) {
 						printf("failed to send");
 					}
