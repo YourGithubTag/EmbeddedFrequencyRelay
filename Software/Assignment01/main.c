@@ -118,6 +118,12 @@ SemaphoreHandle_t whichBoundFlag_mutex;
 SemaphoreHandle_t lcdUpdate_sem;
 
 
+//Semaphore for monitoring mode
+
+SemaphoreHandle_t monitorTimerControl_sem;
+SemaphoreHandle_t monitorSwitchLogic_sem;
+
+
 /*---------- FUNCTION DECLARATIONS ----------*/
 double array2double(unsigned int *newVal);
 
@@ -134,6 +140,7 @@ LEDStruct SystemState;
 unsigned int SwitchState;
 
 unsigned int monitorMode;
+
 SemaphoreHandle_t MonitorMode_sem;
 
 
@@ -229,6 +236,8 @@ static void LoadManagement(void *pvParameters) {
 			xSemaphoreGive(maintenanceModeFlag_mutex);
 
 			xSemaphoreTake(MonitorMode_sem, portMAX_DELAY);
+
+
 			if (!monitorMode) {
 				//Normal Mode
 				if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
@@ -250,19 +259,10 @@ static void LoadManagement(void *pvParameters) {
 				xSemaphoreGive(MonitorMode_sem);
 
 			} else {
-				//Moniter Mode
+				//Moniter Semaphore Running
+				xSemaphoreGive(monitorTimerControl_sem);
+				xSemaphoreGive(monitorSwitchLogic_sem);
 
-				xSemaphoreTake(InStabilityFlag_sem, portMAX_DELAY);
-
-				if (xSemaphoreTake(MonitorTimer_sem,portMAX_DELAY) == pdTRUE) {
-					if (InStabilityFlag) {
-						LoadShed();
-					} else {
-						LoadConnect();
-					}
-				}
-
-				xSemaphoreGive(InStabilityFlag_sem);
 				xSemaphoreGive(MonitorMode_sem);
 			}
 
@@ -270,6 +270,7 @@ static void LoadManagement(void *pvParameters) {
 			//Maintenance Mode
 			//TODO: Add more Logic
 			xSemaphoreGive(maintenanceModeFlag_mutex);
+			
 			if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
 
 				xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
@@ -281,14 +282,26 @@ static void LoadManagement(void *pvParameters) {
 	}
 }
 
+static void MonitorLogic(void *pvParameters) {
+	while (1){
+		if (xSemaphoreTake(MonitorTimer_sem,portMAX_DELAY) == pdTRUE) {
+			xSemaphoreTake(InStabilityFlag_sem, portMAX_DELAY);
+			if (InStabilityFlag) {
+				LoadShed();
+			} else {
+				LoadConnect();
+			}
+		}
+		xSemaphoreGive(InStabilityFlag_sem);
+	}
+}
+
+
 static void MonitorSwitchLogic(void *pvParameters) {
 	unsigned int temp;
 
 	while (1) {
-		
-		xSemaphoreTake(MonitorMode_sem, portMAX_DELAY);
-		if (monitorMode) {
-			xSemaphoreGive(MonitorMode_sem);
+		if (xSemaphoreTake(monitorSwitchLogic_sem,portMAX_DELAY) == pdTRUE) {
 			if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
 				xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
 				//If maybe redundant here
@@ -298,37 +311,30 @@ static void MonitorSwitchLogic(void *pvParameters) {
 				}
 				xSemaphoreGive(SystemState_mutex);
 			}
-		} else {
-			xSemaphoreGive(MonitorMode_sem);
 		}
 	}
 }
 
 static void MonitorTimer(void *pvParameters) {
 	unsigned int PrevInstabilityFlag;
-	
-	if (xSemaphoreTake(MonitorMode_sem) == pdTRUE) {
-		if (monitorMode) {
 
-			xSemaphoreGive(MonitorMode_sem);
-
+	while(1) {
+		if (xSemaphoreTake(monitorTimerControl_sem, portMAX_DELAY) == pdTRUE) {
 			if ( xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY) == pdTRUE) {
 
 				if (PrevInstabilityFlag != InStabilityFlag ) {
-						if (xTimerReset(MonitoringTimer) == pdTRUE) {
-							PrevInstabilityFlag = InStabilityFlag;
-						} else {
-							printf("Timer cannot be reset");
-						}
+					if (xTimerReset(MonitoringTimer) == pdTRUE) {
+						PrevInstabilityFlag = InStabilityFlag;
+					} else {
+						printf("Timer cannot be reset");
+					}
 				}
-
 				xSemaphoreGive(InStabilityFlag_mutex);
 			}
-		} else {
-			xSemaphoreGive(MonitorMode_sem);
 		}
 	}
 }
+
 
 static void LEDcontrol(void *pvParameters) {
 	while (1) {
@@ -349,9 +355,14 @@ static void LoadConnect() {
 	xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
 	//All Loads reconnected
     if (!SystemState.Green) {
-		//Monitor mode semaphore already taken
+
+		//Monitor mode semaphore 
+		xSemaphoreTake(MonitorMode_sem,portMAX_DELAY);
+
 		monitorMode = 0;
 		xTimerStop(xTimer500, 500);
+
+		xSemaphoreGive(MonitorMode_sem,portMAX_DELAY);
 	} else {
 		unsigned int ret = 1;
 		// TODO: Start from bit 7 instead
@@ -823,6 +834,10 @@ int OSDataInit() {
 
 	// Initialise Semaphores
 	lcdUpdate_sem = xSemaphoreCreateBinary();
+
+	monitorTimerControl_sem = xSemaphoreCreateBinary();
+	monitorSwitchLogic_sem = xSemaphoreCreateBinary();
+
 
 	// Initialise mutexes
 	roc_mutex = xSemaphoreCreateMutex();
