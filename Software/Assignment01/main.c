@@ -87,7 +87,6 @@ SemaphoreHandle_t maintenanceModeFlag_mutex;
 // System flag for if we are in maintenance mode
 unsigned int maintenanceModeFlag;
 
-
 typedef struct LEDstatus {
 	unsigned int Red;
 	unsigned int Green;
@@ -220,28 +219,65 @@ void ps2_isr (void* context, alt_u32 id){
 /*---------- TASK DEFINITIONS ----------*/
 
 static void LoadManagement(void *pvParameters) {
+	unsigned int temp;
+	//ALL MUTEX OR SEMAPHORES
+	if (!maintenanceModeFlag) {
 
+		if (!monitorMode) {
+			//Normal Mode
+			if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
+				xQueueSend(LEDQ,&temp,10);
+			}
 
+			if (InStabilityFlag) {
+				LoadShed();
+				xTimerStart(MonitorTimer, 0);
+				monitorMode = 1;
+			}
 
-
+		} else {
+			//Moniter Mode
+			if (xSemaphoreTake(MonitorTimer_sem,portMAX_DELAY) == pdTRUE) {
+				if (InStabilityFlag) {
+					LoadShed();
+				} else {
+					LoadConnect();
+				}
+			}
+		}
+	} else {
+		//Maintenance Mode
+		if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
+			xQueueSend(LEDQ,&temp,10);
+		}
+	}
 }
 
-static void switchMonitor(void *pvParameters) {
+static void MonitorSwitchLogic(void *pvParameters) {
 	unsigned int temp;
-	if (monitorMode) {
-		if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
-			//Take Semaphore
-			if (temp < SystemState.Red) {
-				SystemState
+	LEDStruct tempLED;
+
+	while (1) {
+		//TODO: Semaphore
+		if (monitorMode) {
+
+			if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
+				//Take Semaphore
+
+				//If maybe redundant here
+				if (temp < SystemState.Red) {
+					tempLED.Red = SystemState.Red & temp;
+					tempLED.Green = SystemState.Green & temp;
+					xQueueSend(LEDQ,&tempLED,10);
+				}
 			}
 		}
 	}
-
 }
 
 static void MonitorTimer(void *pvParameters) {
 	unsigned int PrevInstabilityFlag;
-
+	//TODO: Semaphore
 	if (xSemaphoreTake(MonitorMode_sem) == pdTRUE && monitorMode) {
 		xSemaphoreGive(MonitorMode_sem);
 
@@ -287,27 +323,25 @@ static void LoadConnect() {
     if (!temp.Green) {
        if (xSemaphoreTake(monitorMode_sem,portMAX_DELAY) == pdTRUE) {
 		   monitorMode = 0;
+		   xTimerStop(xTimer500, 500);
 	   }
-
 	} else {
 
 		unsigned int ret = 1;
 
-		// Start from bit 7 instead
+		// TODO: Start from bit 7 instead
 
 		while (temp.Green >>= 1) {
 			ret <<= 1;
 		}
 
-		temp.Green -= ret; 
-		temp.Red += ret;
+		temp.Green &= ~ret; 
+		temp.Red |= ret;
 
 		if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
 			;
 		}
-
 	}
-	
 }
 
 static void LoadShed() {
@@ -321,16 +355,16 @@ static void LoadShed() {
 	} else {
 		int num = 1;
 
-		while (temp.Red & num != 1){
+		while (!(temp.Red & num)){
 			num <<= 1;
 		}
 
-		temp.Red -= ret;
-		temp.Green += ret;
+		temp.Red &= ~num;
+		temp.Green |= num;
 
 		if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
 			;
-		} 
+		}
 	}
 }
 
