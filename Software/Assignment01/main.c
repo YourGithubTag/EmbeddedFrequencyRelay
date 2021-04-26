@@ -77,10 +77,6 @@ SemaphoreHandle_t TimerSync_sem;
 // Flag that represents if system is in shedding mode
 unsigned int InStabilityFlag = 0;
 
-unsigned int Timer500Full = 0;
-
-unsigned int loadManageState;
-
 // Mutex for protecting maintenance mode flag
 SemaphoreHandle_t maintenanceModeFlag_mutex;
 // System flag for if we are in maintenance mode
@@ -117,7 +113,6 @@ SemaphoreHandle_t whichBoundFlag_mutex;
 // Syncronisation semaphore between KeyboardChecker and LCDUpdater
 SemaphoreHandle_t lcdUpdate_sem;
 
-
 //Semaphore for monitoring mode
 
 SemaphoreHandle_t monitorTimerControl_sem;
@@ -128,7 +123,6 @@ SemaphoreHandle_t monitorSwitchLogic_sem;
 double array2double(unsigned int *newVal);
 
 
-
 TimerHandle_t MonitoringTimer;
 
 SemaphoreHandle_t MonitorTimer_sem;
@@ -136,8 +130,6 @@ SemaphoreHandle_t MonitorTimer_sem;
 SemaphoreHandle_t SystemState_mutex;
 
 LEDStruct SystemState;
-
-unsigned int SwitchState;
 
 unsigned int monitorMode;
 
@@ -270,7 +262,7 @@ static void LoadManagement(void *pvParameters) {
 			//Maintenance Mode
 			//TODO: Add more Logic
 			xSemaphoreGive(maintenanceModeFlag_mutex);
-			
+
 			if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
 
 				xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
