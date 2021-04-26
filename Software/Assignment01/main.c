@@ -225,7 +225,7 @@ static void LoadManagement(void *pvParameters) {
 		//May have to change to instantly giving the mutex once checked
 		xSemaphoreTake(maintenanceModeFlag_mutex, portMAX_DELAY);
 		if (!maintenanceModeFlag) {
-			
+
 			xSemaphoreGive(maintenanceModeFlag_mutex);
 
 			xSemaphoreTake(MonitorMode_sem, portMAX_DELAY);
@@ -283,42 +283,49 @@ static void LoadManagement(void *pvParameters) {
 
 static void MonitorSwitchLogic(void *pvParameters) {
 	unsigned int temp;
-	LEDStruct tempLED;
 
 	while (1) {
-		//TODO: Semaphore
+		
 		xSemaphoreTake(MonitorMode_sem, portMAX_DELAY);
 		if (monitorMode) {
 			xSemaphoreGive(MonitorMode_sem);
 			if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
-				
+				xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
 				//If maybe redundant here
 				if (temp < SystemState.Red) {
 					SystemState.Red = SystemState.Red & temp;
 					SystemState.Green = SystemState.Green & temp;
 				}
+				xSemaphoreGive(SystemState_mutex);
 			}
+		} else {
+			xSemaphoreGive(MonitorMode_sem);
 		}
-		xSemaphoreGive(MonitorMode_sem);
 	}
 }
 
 static void MonitorTimer(void *pvParameters) {
 	unsigned int PrevInstabilityFlag;
-	//TODO: Semaphore
-	if (xSemaphoreTake(MonitorMode_sem) == pdTRUE && monitorMode) {
-		xSemaphoreGive(MonitorMode_sem);
+	
+	if (xSemaphoreTake(MonitorMode_sem) == pdTRUE) {
+		if (monitorMode) {
+			
+			xSemaphoreGive(MonitorMode_sem);
 
-		if ( xSemaphoreTake(InStabilityFlag_mutex) == pdTRUE) {
+			if ( xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY) == pdTRUE) {
 
-		 if (PrevInstabilityFlag != InStabilityFlag ) {
-				if (xTimerReset(MonitoringTimer) == pdTRUE) {
-					PrevInstabilityFlag = InStabilityFlag;
-				} else {
-					printf("Timer cannot be reset");
+				if (PrevInstabilityFlag != InStabilityFlag ) {
+						if (xTimerReset(MonitoringTimer) == pdTRUE) {
+							PrevInstabilityFlag = InStabilityFlag;
+						} else {
+							printf("Timer cannot be reset");
+						}
 				}
+
+				xSemaphoreGive(InStabilityFlag_mutex);
 			}
-			xSemaphoreGive(InStabilityFlag_mutex);
+		} else {
+			xSemaphoreGive(MonitorMode_sem);
 		}
 	}
 }
