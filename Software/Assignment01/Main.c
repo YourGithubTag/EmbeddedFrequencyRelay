@@ -12,11 +12,11 @@
 #include <math.h>
 
 /* Scheduler includes. */
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
-#include "freertos/timers.h"
+#include "FreeRTOS/FreeRTOS.h"
+#include "FreeRTOS/task.h"
+#include "FreeRTOS/queue.h"
+#include "FreeRTOS/semphr.h"
+#include "FreeRTOS/timers.h"
 
 /* HAL API includes */
 #include "system.h"
@@ -57,7 +57,6 @@ TaskHandle_t xHandle;
 // Definition of Semaphore
 SemaphoreHandle_t shared_resource_sem;
 
-SempahoreHandle_t TimerTaskSync;
 
 // globals variables
 QueueHandle_t SwitchQ;
@@ -150,8 +149,8 @@ void freq_relay(){
 	return;
 }
 
-void vMonitoringTimerCallback(xTimerHandle_t timer) {
-	xSemaphoreGive(MonitorTimer_sem,NULL);
+void vMonitoringTimerCallback(TimerHandle_t timer) {
+	xSemaphoreGive(MonitorTimer_sem);
 }
 
 // ISR for handling PS/2 keyboard presses
@@ -216,6 +215,49 @@ void ps2_isr (void* context, alt_u32 id){
 
 /*---------- TASK DEFINITIONS ----------*/
 
+static void LoadConnect(void ) {
+	xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
+	//All Loads reconnected
+    if (!SystemState.Green) {
+
+		//Monitor mode semaphore 
+		xSemaphoreTake(MonitorMode_sem,portMAX_DELAY);
+
+		monitorMode = 0;
+		xTimerStop(MonitoringTimer, 500);
+
+		xSemaphoreGive(MonitorMode_sem);
+	} else {
+		unsigned int ret = 1;
+		// TODO: Start from bit 7 instead
+
+		while (SystemState.Green >>= 1) {
+			ret <<= 1;
+		}
+
+		SystemState.Green &= ~ret; 
+		SystemState.Red |= ret;
+	}
+	xSemaphoreGive(SystemState_mutex);
+}
+
+static void LoadShed(void ) {
+	xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
+	if (!SystemState.Red) {
+        return;
+	} else {
+		int num = 1;
+
+		while (!(SystemState.Red & num)){
+			num <<= 1;
+		}
+
+		SystemState.Red &= ~num;
+		SystemState.Green |= num;
+	}
+	xSemaphoreGive(SystemState_mutex);
+}
+
 static void LoadManagement(void *pvParameters) {
 	unsigned int temp;
 	
@@ -239,15 +281,15 @@ static void LoadManagement(void *pvParameters) {
 					xSemaphoreGive(SystemState_mutex);
 				}
 
-				xSemaphoreTake(InStabilityFlag_sem, portMAX_DELAY);
+				xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY);
 				//Checking Instability whilst in NOrmal operation
 				if (InStabilityFlag) {
 					LoadShed();
-					xTimerStart(MonitorTimer, 0);
+					xTimerStart(MonitoringTimer, 0);
 					monitorMode = 1;
 				}
 
-				xSemaphoreGive(InStabilityFlag_sem);
+				xSemaphoreGive(InStabilityFlag_mutex);
 				xSemaphoreGive(MonitorMode_sem);
 
 			} else {
@@ -257,7 +299,6 @@ static void LoadManagement(void *pvParameters) {
 
 				xSemaphoreGive(MonitorMode_sem);
 			}
-
 		} else {
 			//Maintenance Mode
 			//TODO: Add more Logic
@@ -273,21 +314,6 @@ static void LoadManagement(void *pvParameters) {
 		}
 	}
 }
-
-static void MonitorLogic(void *pvParameters) {
-	while (1){
-		if (xSemaphoreTake(MonitorTimer_sem,portMAX_DELAY) == pdTRUE) {
-			xSemaphoreTake(InStabilityFlag_sem, portMAX_DELAY);
-			if (InStabilityFlag) {
-				LoadShed();
-			} else {
-				LoadConnect();
-			}
-		}
-		xSemaphoreGive(InStabilityFlag_sem);
-	}
-}
-
 
 static void MonitorSwitchLogic(void *pvParameters) {
 	unsigned int temp;
@@ -315,7 +341,7 @@ static void MonitorTimer(void *pvParameters) {
 			if ( xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY) == pdTRUE) {
 
 				if (PrevInstabilityFlag != InStabilityFlag ) {
-					if (xTimerReset(MonitoringTimer) == pdTRUE) {
+					if (xTimerReset(MonitoringTimer, 50) == pdTRUE) {
 						PrevInstabilityFlag = InStabilityFlag;
 					} else {
 						printf("Timer cannot be reset");
@@ -343,54 +369,25 @@ static void LEDcontrol(void *pvParameters) {
 	}
 }
 
-static void LoadConnect() {
-	xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
-	//All Loads reconnected
-    if (!SystemState.Green) {
-
-		//Monitor mode semaphore 
-		xSemaphoreTake(MonitorMode_sem,portMAX_DELAY);
-
-		monitorMode = 0;
-		xTimerStop(xTimer500, 500);
-
-		xSemaphoreGive(MonitorMode_sem,portMAX_DELAY);
-	} else {
-		unsigned int ret = 1;
-		// TODO: Start from bit 7 instead
-
-		while (SystemState.Green >>= 1) {
-			ret <<= 1;
+static void MonitorLogic(void *pvParameters) {
+	while (1){
+		if (xSemaphoreTake(MonitorTimer_sem,portMAX_DELAY) == pdTRUE) {
+			xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY);
+			if (InStabilityFlag) {
+				LoadShed();
+			} else {
+				LoadConnect();
+			}
 		}
-
-		SystemState.Green &= ~ret; 
-		SystemState.Red |= ret;
+		xSemaphoreGive(InStabilityFlag_mutex);
 	}
-	xSemaphoreGive(SystemState_mutex);
 }
 
-static void LoadShed() {
-	xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
-	if (!SystemState.Red) {
-        return;
-	} else {
-		int num = 1;
-
-		while (!(SystemState.Red & num)){
-			num <<= 1;
-		}
-
-		SystemState.Red &= ~num;
-		SystemState.Green |= num;
-	}
-	xSemaphoreGive(SystemState_mutex);
-}
 
 static void WallSwitchPoll(void *pvParameters) {
 
 	unsigned int CurrSwitchValue = 0;
 	unsigned int PrevSwitchValue = 0;
-	unsigned int temp = 0;
 	printf("WALL SWITCH \n");
 
 	CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
@@ -802,10 +799,15 @@ int CreateTasks() {
 	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
 	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 2, NULL);
 	xTaskCreate(VGADisplayTask, "VGADisplay", TASK_STACKSIZE, NULL, 3, NULL);
-	xTaskCreate(load_manage,"LDM",TASK_STACKSIZE,NULL,4,NULL);
+	xTaskCreate(LoadManagement,"LDM",TASK_STACKSIZE,NULL,4,NULL);
 	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,5,NULL);
 	xTaskCreate(KeyboardReader, "KeyboardReader", TASK_STACKSIZE, NULL, 6, NULL);
 	xTaskCreate(LCDUpdater, "LCDUpdater", TASK_STACKSIZE, NULL, 7, NULL);
+
+	xTaskCreate(MonitorLogic, "ML",TASK_STACKSIZE, NULL, 8, NULL);
+	xTaskCreate(MonitorSwitchLogic,"SML",TASK_STACKSIZE, NULL, 9, NULL);
+	xTaskCreate(MonitorTimer, "MT",TASK_STACKSIZE, NULL, 10, NULL);
+
 	return 0;
 }
 
@@ -820,7 +822,6 @@ int OSDataInit() {
 	// Initialise queues
 	SwitchQ = xQueueCreate( 100, sizeof(unsigned int) );
 	newFreqQ = xQueueCreate(10, sizeof( void* ));
-	LEDQ = xQueueCreate(100, sizeof(LEDStruct));
 	vgaFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 	keyboardQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 
@@ -838,7 +839,6 @@ int OSDataInit() {
 	lowerFreqBound_mutex = xSemaphoreCreateMutex();
 	rocBound_mutex = xSemaphoreCreateMutex();
 	whichBoundFlag_mutex = xSemaphoreCreateMutex();
-	TimerTaskSync = xSemaphoreCreateBinary();
 	MonitorTimer_sem = xSemaphoreCreateBinary();
 
 	return 0;
