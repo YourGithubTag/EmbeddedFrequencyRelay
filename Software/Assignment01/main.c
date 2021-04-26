@@ -309,7 +309,7 @@ static void MonitorTimer(void *pvParameters) {
 	
 	if (xSemaphoreTake(MonitorMode_sem) == pdTRUE) {
 		if (monitorMode) {
-			
+
 			xSemaphoreGive(MonitorMode_sem);
 
 			if ( xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY) == pdTRUE) {
@@ -331,16 +331,17 @@ static void MonitorTimer(void *pvParameters) {
 }
 
 static void LEDcontrol(void *pvParameters) {
-	LEDStruct Temp;
-
 	while (1) {
 		if (xSemaphoreTake(SystemState_mutex,portMAX_DELAY) == pdTRUE) {
+
 			IOWR_ALTERA_AVALON_PIO_DATA(RED_LEDS_BASE, SystemState.Red);
 			IOWR_ALTERA_AVALON_PIO_DATA(GREEN_LEDS_BASE, SystemState.Green);
+
+			xSemaphoreGive(SystemState_mutex);
 		} else {
 			printf("Dead \n");
+			xSemaphoreGive(SystemState_mutex);
 		}
-		xSemaphoreGive(SystemState_mutex);
 	}
 }
 
@@ -395,8 +396,11 @@ static void WallSwitchPoll(void *pvParameters) {
 		}
 
   while (1){
-   		 
+   		xSemaphoreTake(maintenanceModeFlag_mutex, portMAX_DELAY);
+
 		if (!maintenanceModeFlag) {
+
+			xSemaphoreGive(maintenanceModeFlag_mutex);
 
 			CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
 			
@@ -411,9 +415,10 @@ static void WallSwitchPoll(void *pvParameters) {
 					} 
 				}
 			}
-
 			PrevSwitchValue = CurrSwitchValue;
 		}
+
+		xSemaphoreGive(maintenanceModeFlag_mutex);
 
   //vTaskDelay(10);
   }
