@@ -225,6 +225,8 @@ static void LoadManagement(void *pvParameters) {
 		//May have to change to instantly giving the mutex once checked
 		xSemaphoreTake(maintenanceModeFlag_mutex, portMAX_DELAY);
 		if (!maintenanceModeFlag) {
+			
+			xSemaphoreGive(maintenanceModeFlag_mutex);
 
 			xSemaphoreTake(MonitorMode_sem, portMAX_DELAY);
 			if (!monitorMode) {
@@ -267,11 +269,15 @@ static void LoadManagement(void *pvParameters) {
 		} else {
 			//Maintenance Mode
 			//TODO: Add more Logic
+			xSemaphoreGive(maintenanceModeFlag_mutex);
 			if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
-				xQueueSend(LEDQ,&temp,10);
+
+				xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
+					SystemState.Red = temp;
+					SystemState.Green = 0;
+				xSemaphoreGive(SystemState_mutex);
 			}
 		}
-		xSemaphoreGive(maintenanceModeFlag_mutex);
 	}
 }
 
@@ -306,13 +312,13 @@ static void MonitorTimer(void *pvParameters) {
 		if ( xSemaphoreTake(InStabilityFlag_mutex) == pdTRUE) {
 
 		 if (PrevInstabilityFlag != InStabilityFlag ) {
-			 xSemaphoreGive(InStabilityFlag_mutex);
 				if (xTimerReset(MonitoringTimer) == pdTRUE) {
 					PrevInstabilityFlag = InStabilityFlag;
 				} else {
 					printf("Timer cannot be reset");
 				}
 			}
+			xSemaphoreGive(InStabilityFlag_mutex);
 		}
 	}
 }
@@ -321,57 +327,40 @@ static void LEDcontrol(void *pvParameters) {
 	LEDStruct Temp;
 
 	while (1) {
-		if (xQueueReceive(LEDQ, &Temp, portMAX_DELAY) == pdTRUE) {
-
-			IOWR_ALTERA_AVALON_PIO_DATA(RED_LEDS_BASE, Temp.Red);
-			IOWR_ALTERA_AVALON_PIO_DATA(GREEN_LEDS_BASE, Temp.Green);
-
-			SystemState.Red = Temp.Red;
-			SystemState.Green = Temp.Green;
-
+		if (xSemaphoreTake(SystemState_mutex,portMAX_DELAY) == pdTRUE) {
+			IOWR_ALTERA_AVALON_PIO_DATA(RED_LEDS_BASE, SystemState.Red);
+			IOWR_ALTERA_AVALON_PIO_DATA(GREEN_LEDS_BASE, SystemState.Green);
 		} else {
 			printf("Dead \n");
 		}
+		xSemaphoreGive(SystemState_mutex);
 	}
 }
 
 static void LoadConnect() {
-	LEDStruct temp;
-
-	temp.Green = SystemState.Green;
-	temp.Red = SystemState.Red;
-
+	xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
 	//All Loads reconnected
-    if (!temp.Green) {
-       if (xSemaphoreTake(monitorMode_sem,portMAX_DELAY) == pdTRUE) {
-		   monitorMode = 0;
-		   xTimerStop(xTimer500, 500);
-	   }
+    if (!SystemState.Green) {
+		//Monitor mode semaphore already taken
+		monitorMode = 0;
+		xTimerStop(xTimer500, 500);
 	} else {
-
 		unsigned int ret = 1;
-
 		// TODO: Start from bit 7 instead
 
-		while (temp.Green >>= 1) {
+		while (SystemState.Green >>= 1) {
 			ret <<= 1;
 		}
 
-		temp.Green &= ~ret; 
-		temp.Red |= ret;
-
-		if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
-			;
-		}
+		SystemState.Green &= ~ret; 
+		SystemState.Red |= ret;
 	}
+	xSemaphoreGive(SystemState_mutex);
 }
 
 static void LoadShed() {
 	xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
-	SystemState.Green;
-	SystemState.Red;
-
-	 if (!SystemState.Red) {
+	if (!SystemState.Red) {
         return;
 	} else {
 		int num = 1;
@@ -382,11 +371,8 @@ static void LoadShed() {
 
 		SystemState.Red &= ~num;
 		SystemState.Green |= num;
-
-		if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
-			;
-		}
 	}
+	xSemaphoreGive(SystemState_mutex);
 }
 
 static void WallSwitchPoll(void *pvParameters) {
