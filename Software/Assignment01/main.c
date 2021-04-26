@@ -62,7 +62,6 @@ SempahoreHandle_t TimerTaskSync;
 // globals variables
 QueueHandle_t SwitchQ;
 
-QueueHandle_t LEDQ;
 
 // Queue for communication between StabilityControlCheck & VGADisplayTask
 QueueHandle_t vgaFreqQ;
@@ -220,36 +219,59 @@ void ps2_isr (void* context, alt_u32 id){
 
 static void LoadManagement(void *pvParameters) {
 	unsigned int temp;
-	//ALL MUTEX OR SEMAPHORES
-	if (!maintenanceModeFlag) {
+	
+	while (1) {
+		//TODO: See if taking multiple Mutexes at once leads to possible race conditions
+		//May have to change to instantly giving the mutex once checked
+		xSemaphoreTake(maintenanceModeFlag_mutex, portMAX_DELAY);
+		if (!maintenanceModeFlag) {
 
-		if (!monitorMode) {
-			//Normal Mode
-			if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
-				xQueueSend(LEDQ,&temp,10);
-			}
+			xSemaphoreTake(MonitorMode_sem, portMAX_DELAY);
+			if (!monitorMode) {
+				//Normal Mode
+				if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
+					xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
+					SystemState.Red = temp;
+					SystemState.Green = 0;
+					xSemaphoreGive(SystemState_mutex);
+				}
 
-			if (InStabilityFlag) {
-				LoadShed();
-				xTimerStart(MonitorTimer, 0);
-				monitorMode = 1;
+				xSemaphoreTake(InStabilityFlag_sem, portMAX_DELAY);
+				//Checking Instability whilst in NOrmal operation
+				if (InStabilityFlag) {
+					LoadShed();
+					xTimerStart(MonitorTimer, 0);
+					monitorMode = 1;
+				}
+
+				xSemaphoreGive(InStabilityFlag_sem);
+				xSemaphoreGive(MonitorMode_sem);
+
+			} else {
+				//Moniter Mode
+
+				xSemaphoreTake(InStabilityFlag_sem, portMAX_DELAY);
+
+				if (xSemaphoreTake(MonitorTimer_sem,portMAX_DELAY) == pdTRUE) {
+					if (InStabilityFlag) {
+						LoadShed();
+					} else {
+						LoadConnect();
+					}
+				}
+
+				xSemaphoreGive(InStabilityFlag_sem);
+				xSemaphoreGive(MonitorMode_sem);
 			}
 
 		} else {
-			//Moniter Mode
-			if (xSemaphoreTake(MonitorTimer_sem,portMAX_DELAY) == pdTRUE) {
-				if (InStabilityFlag) {
-					LoadShed();
-				} else {
-					LoadConnect();
-				}
+			//Maintenance Mode
+			//TODO: Add more Logic
+			if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
+				xQueueSend(LEDQ,&temp,10);
 			}
 		}
-	} else {
-		//Maintenance Mode
-		if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
-			xQueueSend(LEDQ,&temp,10);
-		}
+		xSemaphoreGive(maintenanceModeFlag_mutex);
 	}
 }
 
@@ -259,19 +281,19 @@ static void MonitorSwitchLogic(void *pvParameters) {
 
 	while (1) {
 		//TODO: Semaphore
+		xSemaphoreTake(MonitorMode_sem, portMAX_DELAY);
 		if (monitorMode) {
-
+			xSemaphoreGive(MonitorMode_sem);
 			if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
-				//Take Semaphore
-
+				
 				//If maybe redundant here
 				if (temp < SystemState.Red) {
-					tempLED.Red = SystemState.Red & temp;
-					tempLED.Green = SystemState.Green & temp;
-					xQueueSend(LEDQ,&tempLED,10);
+					SystemState.Red = SystemState.Red & temp;
+					SystemState.Green = SystemState.Green & temp;
 				}
 			}
 		}
+		xSemaphoreGive(MonitorMode_sem);
 	}
 }
 
@@ -345,22 +367,21 @@ static void LoadConnect() {
 }
 
 static void LoadShed() {
-	LEDStruct temp;
+	xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
+	SystemState.Green;
+	SystemState.Red;
 
-	temp.Green = SystemState.Green;
-	temp.Red = SystemState.Red;
-
-	 if (!temp.Red) {
+	 if (!SystemState.Red) {
         return;
 	} else {
 		int num = 1;
 
-		while (!(temp.Red & num)){
+		while (!(SystemState.Red & num)){
 			num <<= 1;
 		}
 
-		temp.Red &= ~num;
-		temp.Green |= num;
+		SystemState.Red &= ~num;
+		SystemState.Green |= num;
 
 		if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
 			;
