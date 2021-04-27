@@ -61,6 +61,7 @@ SemaphoreHandle_t shared_resource_sem;
 // globals variables
 QueueHandle_t SwitchQ;
 
+QueueHandle_t LEDQ;
 
 // Queue for communication between StabilityControlCheck & VGADisplayTask
 QueueHandle_t vgaFreqQ;
@@ -420,27 +421,27 @@ void WallSwitchPoll(void *pvParameters) {
 
    		if (xSemaphoreTake(maintenanceModeFlag_mutex, portMAX_DELAY) == pdTRUE ){
 
-		if (!maintenanceModeFlag) {
+			if (!maintenanceModeFlag) {
 
-			xSemaphoreGive(maintenanceModeFlag_mutex);
+				xSemaphoreGive(maintenanceModeFlag_mutex);
 
-			CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
-			CurrSwitchValue = CurrSwitchValue & 0x7F;
+				CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
+				CurrSwitchValue = CurrSwitchValue & 0x7F;
 
-			
-			if (monitorMode && (CurrSwitchValue < PrevSwitchValue)) {
-				if (xQueueSend(SwitchQ, &CurrSwitchValue, 10) != pdTRUE) {
-						printf("failed to send \n");
-					}
-			} else {
-				if (CurrSwitchValue != PrevSwitchValue ) {
+				
+				if (monitorMode && (CurrSwitchValue < PrevSwitchValue)) {
 					if (xQueueSend(SwitchQ, &CurrSwitchValue, 10) != pdTRUE) {
-						printf("failed to send \n");
-					} 
+							printf("failed to send \n");
+						}
+				} else {
+					if (CurrSwitchValue != PrevSwitchValue ) {
+						if (xQueueSend(SwitchQ, &CurrSwitchValue, 10) != pdTRUE) {
+							printf("failed to send \n");
+						} 
+					}
 				}
+				PrevSwitchValue = CurrSwitchValue;
 			}
-			PrevSwitchValue = CurrSwitchValue;
-		}
 
 		xSemaphoreGive(maintenanceModeFlag_mutex);
 
