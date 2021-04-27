@@ -96,11 +96,11 @@ SemaphoreHandle_t roc_mutex;
 QueueHandle_t keyboardQ;
 
 // Lower frequency bound
-double lowerFreqBound = 0; // TODO: Choose a default lowerFreqBound
+double lowerFreqBound = 49; // TODO: Choose a default lowerFreqBound
 // Mutex for protecting lower frequency bound
 SemaphoreHandle_t lowerFreqBound_mutex;
 // Absolute rate of change bound
-double rocBound = 0; // TODO: Choose a default rocBound
+double rocBound = 9; // TODO: Choose a default rocBound
 // Mutex for protecting rate of change bound
 SemaphoreHandle_t rocBound_mutex;
 /// whichBoundFlag represents which parameter is currently being edited, 0 = lowerFreqBound, 1 = rocBound)
@@ -144,6 +144,7 @@ void freq_relay(){
 	if (xQueueIsQueueFullFromISR(newFreqQ) == pdFALSE)
 	{
 		xQueueSendFromISR(newFreqQ, (void *)&adcCount, NULL);
+	
 	}
 	return;
 }
@@ -214,24 +215,40 @@ void ps2_isr (void* context, alt_u32 id){
 
 /*---------- TASK DEFINITIONS ----------*/
 
-LEDStruct LoadConnect() {
+void oneshotSample(void) {
+	
+
+	int CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE);
+	CurrSwitchValue = CurrSwitchValue & 0x7F;
+
+	if (xQueueSend(SwitchQ, &CurrSwitchValue, portMAX_DELAY) != pdTRUE) {
+		printf("failed INIT switch send \n");
+	} 
+
+}
+
+void LoadConnect() {
 	LEDStruct state2send;
+
 	xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
+
 	state2send = SystemState;
+	printf("%d \n",SystemState.Green);
+
 	xSemaphoreGive(SystemState_mutex);
 
-	printf("LOAD CONNECTING STARTED \n");
 	//All Loads reconnected
-    if (!state2send.Green) {
-
+    if (!(state2send.Green)) {
 		//Monitor mode semaphore 
-		xSemaphoreTake(MonitorMode_sem,portMAX_DELAY);
+		//xSemaphoreTake(MonitorMode_sem,portMAX_DELAY);
 
 		monitorMode = 0;
 		xTimerStop(MonitoringTimer, 500);
+		//oneshotSample();
 
-		xSemaphoreGive(MonitorMode_sem);
-		return state2send;
+		//xSemaphoreGive(MonitorMode_sem);
+		return ;
+
 	} else {
 		unsigned int ret = 64;
 		// TODO: Start from bit 7 instead
@@ -246,19 +263,22 @@ LEDStruct LoadConnect() {
 		xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
 		SystemState = state2send;
 		xSemaphoreGive(SystemState_mutex);
-		return state2send;
+
+		xQueueSend(LEDQ,&state2send,50);
 	}
+	printf("LOAD CONNECTED \n");
 }
 
-LEDStruct LoadShed() {
+void LoadShed() {
 	LEDStruct state2send;
-	printf("LOAD SHEDDING STARTED \n");
+
 	xSemaphoreTake(SystemState_mutex, portMAX_DELAY);
 	state2send = SystemState;
+	printf("%d \n",SystemState.Red);
 	xSemaphoreGive(SystemState_mutex);
 
-	if (!state2send.Red) {
-        return state2send;
+	if (!(state2send.Red)) {
+        return;
 	} else {
 		int num = 1;
 
@@ -272,13 +292,16 @@ LEDStruct LoadShed() {
 		xSemaphoreTake(SystemState_mutex,50);
 		SystemState = state2send;
 		xSemaphoreGive(SystemState_mutex);
-		return state2send;
+
+		xQueueSend(LEDQ,&state2send,50);
 	}
+	printf("LOAD SHEDED \n");
 }
 
 void LoadManagement(void *pvParameters) {
 	unsigned int temp;
 	LEDStruct state2send;
+	int oneshot = 0;
 	
 	while (1) {
 		
@@ -292,8 +315,11 @@ void LoadManagement(void *pvParameters) {
 			//if (xSemaphoreTake(MonitorMode_sem, portMAX_DELAY) == pdTRUE) {
 
 				if (!monitorMode) {
+					if (oneshot) {
+						oneshot = 0;
+						oneshotSample();
+					}
 					//Normal Mode
-
 					if (xQueueReceive(SwitchQ, &temp, portMAX_DELAY) == pdTRUE) {
 
 						xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
@@ -320,11 +346,26 @@ void LoadManagement(void *pvParameters) {
 				} else {
 					//Moniter Semaphore Running
 					xSemaphoreGive(monitorTimerControl_sem);
-					xSemaphoreGive(monitorSwitchLogic_sem);
+					
+					if (xQueueReceive(SwitchQ,&temp, 50) == pdTRUE) {
+						oneshot = 1;
 
-					xSemaphoreGive(MonitorMode_sem);
+						if (xSemaphoreTake(SystemState_mutex,portMAX_DELAY) == pdTRUE ) {
+						//If maybe redundant here
+
+								SystemState.Red = SystemState.Red & temp;
+								SystemState.Green = SystemState.Green & temp;
+
+								state2send = SystemState;
+
+								xQueueSend(LEDQ,&state2send,40);
+							
+							xSemaphoreGive(SystemState_mutex);
+						}
+					}
 				}
-				
+			//	xSemaphoreGive(MonitorMode_sem);
+			//}
 			
 		/*} else {
 			//Maintenance Mode
@@ -362,6 +403,8 @@ void LoadManagement(void *pvParameters) {
 	vTaskDelay(10);
 }
 
+
+
 void MonitorSwitchLogic(void *pvParameters) {
 	unsigned int temp;
 	LEDStruct state2send;
@@ -391,6 +434,7 @@ void MonitorTimer(void *pvParameters) {
 	unsigned int PrevInstabilityFlag;
 	usleep(25);
 	while(1) {
+
 		if (xSemaphoreTake(monitorTimerControl_sem, portMAX_DELAY) == pdTRUE) {
 
 			if ( xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY) == pdTRUE) {
@@ -405,6 +449,27 @@ void MonitorTimer(void *pvParameters) {
 
 				xSemaphoreGive(InStabilityFlag_mutex);
 			}
+		}
+	}
+}
+
+void MonitorLogic(void *pvParameters) {
+
+	while (1){
+		if (xSemaphoreTake(MonitorTimer_sem,portMAX_DELAY) == pdTRUE) {
+
+			if (xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY) == pdTRUE){
+				printf("Monitor MOde: %d \n", monitorMode);
+				if (InStabilityFlag) {
+					LoadShed();
+					printf("Unstable\n");
+				} else {
+					LoadConnect();
+					printf("Stable\n");
+				}
+
+			}
+			xSemaphoreGive(InStabilityFlag_mutex);
 		}
 	}
 }
@@ -424,39 +489,12 @@ void LEDcontrol(void *pvParameters) {
 	}
 }
 
-void MonitorLogic(void *pvParameters) {
-	LEDStruct state2send;
-	usleep(25);
-	while (1){
-		if (xSemaphoreTake(MonitorTimer_sem,portMAX_DELAY) == pdTRUE) {
-
-			if (xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY) == pdTRUE){
-
-			if (InStabilityFlag) {
-				state2send = LoadShed();
-				xQueueSend(LEDQ,&state2send,50);
-			} else {
-				state2send = LoadConnect();
-				xQueueSend(LEDQ,&state2send,50);
-			}
-		}
-		xSemaphoreGive(InStabilityFlag_mutex);
-		}
-	}
-}
-
 
 void WallSwitchPoll(void *pvParameters) {
 
 	unsigned int CurrSwitchValue = 0;
 	unsigned int PrevSwitchValue = 0;
-	
-	CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE);
-	CurrSwitchValue = CurrSwitchValue & 0x7F;
-
-	if (xQueueSend(SwitchQ, &CurrSwitchValue, portMAX_DELAY) != pdTRUE) {
-		printf("failed INIT switch send \n");
-	} 
+	oneshotSample();
 
   while (1){
 	  	//REMOVED MAINTANCE MODE CHECK --MUTEX DEPENDANACE
@@ -471,7 +509,7 @@ void WallSwitchPoll(void *pvParameters) {
 				
 				PrevSwitchValue = CurrSwitchValue;
 
-  //vTaskDelay(50);
+ 	 vTaskDelay(100);
 	}
 
 }
@@ -545,6 +583,7 @@ void StabilityControlCheck(void *pvParameters)
 				if ((newFreq < lowerFreqBound_local) || (rocLocal > rocBound_local))
 				{
 					InStabilityFlag = 1;
+					
 				}
 			}
 			// Check unstable system for stability
@@ -554,6 +593,7 @@ void StabilityControlCheck(void *pvParameters)
 				if ((newFreq >= lowerFreqBound_local) && (rocLocal <= rocBound_local))
 				{
 					InStabilityFlag = 0;
+					
 				}
 			}
 			xSemaphoreGive(InStabilityFlag_mutex);
@@ -854,11 +894,11 @@ int CreateTasks() {
 
 	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
 
-	//xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 4, NULL);
+	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 6, NULL);
 
 	//xTaskCreate(VGADisplayTask, "VGADisplay", TASK_STACKSIZE, NULL, 3, NULL);
 
-	xTaskCreate(LoadManagement,"LDM",TASK_STACKSIZE,NULL,3,NULL);
+	xTaskCreate(LoadManagement,"LDM",TASK_STACKSIZE,NULL,5,NULL);
 
 	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,2,NULL);
 
@@ -866,11 +906,11 @@ int CreateTasks() {
 
 	//xTaskCreate(LCDUpdater, "LCDUpdater", TASK_STACKSIZE, NULL, 7, NULL);
 
-	//xTaskCreate(MonitorLogic, "ML",TASK_STACKSIZE, NULL, 3, NULL);
+	xTaskCreate(MonitorLogic, "ML",TASK_STACKSIZE, NULL, 4, NULL);
 
 	//xTaskCreate(MonitorSwitchLogic,"SML",TASK_STACKSIZE, NULL, 4, NULL);
 
-	//xTaskCreate(MonitorTimer, "MT",TASK_STACKSIZE, NULL, 5, NULL);
+	xTaskCreate(MonitorTimer, "MT",TASK_STACKSIZE, NULL, 3, NULL);
 
 	printf("All tasks made Okay! \n");
 
@@ -937,10 +977,11 @@ int main(int argc, char* argv[], char* envp[])
 	alt_up_ps2_clear_fifo(ps2_device);
 	alt_irq_register(PS2_IRQ, ps2_device, ps2_isr);
 	IOWR_8DIRECT(PS2_BASE,4,1);
-
+*/
 	// Register Frequency Analyser ISR
 	alt_irq_register(FREQUENCY_ANALYSER_IRQ, 0, freq_relay);
 
+/*
 
 	printf("schduler start init\n");
 	usleep(25);
