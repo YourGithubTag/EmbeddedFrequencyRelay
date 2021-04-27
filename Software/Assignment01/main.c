@@ -2,14 +2,13 @@
 // Cecil Symes, Nikhil Kumar
 // csym531, nkmu576
 
-
-
 /*---------- INCLUDES ----------*/
 /* Standard includes. */
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
 
 /* Scheduler includes. */
 #include "freertos/FreeRTOS.h"
@@ -26,7 +25,8 @@
 #include "unistd.h"
 #include "altera_up_avalon_ps2.h"
 #include "altera_up_ps2_keyboard.h"
-
+#include "altera_up_avalon_video_character_buffer_with_dma.h"
+#include "altera_up_avalon_video_pixel_buffer_dma.h"
 
 
 /*---------- DEFINITIONS ----------*/
@@ -44,6 +44,20 @@
 // Definition of Message Queue
 #define   MSG_QUEUE_SIZE  30
 
+//For frequency plot
+#define FREQPLT_ORI_X 101		//x axis pixel position at the plot origin
+#define FREQPLT_GRID_SIZE_X 5	//pixel separation in the x axis between two data points
+#define FREQPLT_ORI_Y 199.0		//y axis pixel position at the plot origin
+#define FREQPLT_FREQ_RES 20.0	//number of pixels per Hz (y axis scale)
+
+#define ROCPLT_ORI_X 101
+#define ROCPLT_GRID_SIZE_X 5
+#define ROCPLT_ORI_Y 259.0
+#define ROCPLT_ROC_RES 1		//number of pixels per Hz/s (y axis scale)
+
+#define MIN_FREQ 45.0 //minimum frequency to draw
+
+#define PRVGADraw_Task_P      (tskIDLE_PRIORITY+1)
 
 
 /*---------- GLOBAL VARIABLES ----------*/
@@ -51,21 +65,24 @@ QueueHandle_t msgqueue;
 
 QueueHandle_t ControlQ;
 
-// used to delete a task
-TaskHandle_t xHandle;
+// Used to delete tasks
+TaskHandle_t xWallSwitchPoll;
+TaskHandle_t xStabilityControlCheck;
+TaskHandle_t xPRVGADraw_Task;
+TaskHandle_t xload_manage;
+TaskHandle_t xLEDcontrol;
+TaskHandle_t xKeyboardReader;
+TaskHandle_t xLCDUpdater;
 
 // Definition of Semaphore
 SemaphoreHandle_t shared_resource_sem;
 
-SempahoreHandle_t TimerTaskSync;
+SemaphoreHandle_t TimerTaskSync;
 
 // globals variables
 QueueHandle_t SwitchQ;
 
 QueueHandle_t LEDQ;
-
-// Queue for communication between StabilityControlCheck & VGADisplayTask
-QueueHandle_t vgaFreqQ;
 
 // Queue for communication between FreqAnalyserISR & StabilityControlCheck
 QueueHandle_t newFreqQ;
@@ -105,11 +122,11 @@ SemaphoreHandle_t roc_mutex;
 QueueHandle_t keyboardQ;
 
 // Lower frequency bound
-double lowerFreqBound = 0; // TODO: Choose a default lowerFreqBound
+double lowerFreqBound = 40; // TODO: Choose a default lowerFreqBound
 // Mutex for protecting lower frequency bound
 SemaphoreHandle_t lowerFreqBound_mutex;
 // Absolute rate of change bound
-double rocBound = 0; // TODO: Choose a default rocBound
+double rocBound = 20; // TODO: Choose a default rocBound
 // Mutex for protecting rate of change bound
 SemaphoreHandle_t rocBound_mutex;
 /// whichBoundFlag represents which parameter is currently being edited, 0 = lowerFreqBound, 1 = rocBound)
@@ -119,6 +136,17 @@ SemaphoreHandle_t whichBoundFlag_mutex;
 
 // Syncronisation semaphore between KeyboardChecker and LCDUpdater
 SemaphoreHandle_t lcdUpdate_sem;
+
+// Queue to send freq from ISR to VGA task
+QueueHandle_t Q_freq_data;
+
+// Structure for data within PRVGA task
+typedef struct{
+	unsigned int x1;
+	unsigned int y1;
+	unsigned int x2;
+	unsigned int y2;
+}Line;
 
 
 /*---------- FUNCTION DECLARATIONS ----------*/
@@ -140,17 +168,23 @@ void freq_relay(){
 	// Read ADC count
 	unsigned int adcCount = IORD(FREQUENCY_ANALYSER_BASE, 0);
 
-	// Send count if queue not full
+	// Send count to StabilityControlChecke if queue not full
 	if (xQueueIsQueueFullFromISR(newFreqQ) == pdFALSE)
 	{
 		xQueueSendFromISR(newFreqQ, (void *)&adcCount, NULL);
 	}
+
+	// Send count to PRVGADraw_Task queue not full
+	if (xQueueIsQueueFullFromISR(Q_freq_data) == pdFALSE)
+	{
+		xQueueSendToBackFromISR( Q_freq_data, (void*)&adcCount, pdFALSE );
+	}
 	return;
 }
-
-void vMonitoringTimerCallback(xTimerHandle_t timer) {
-	xSemaphoreGive(MonitorTimer_sem,NULL);
-}
+//
+//void vMonitoringTimerCallback(xTimerHandle_t timer) {
+//	xSemaphoreGive(MonitorTimer_sem,NULL);
+//}
 
 // ISR for handling PS/2 keyboard presses
 void ps2_isr (void* context, alt_u32 id){
@@ -166,9 +200,12 @@ void ps2_isr (void* context, alt_u32 id){
 	IOWR(SEVEN_SEG_BASE, 0,key);
 
 	// Create local copy of maintenanceModeFlag
-	xSemaphoreTakeFromISR(maintenanceModeFlag_mutex, NULL);
-	unsigned int maintModeFlag_local = 1; //maintenanceModeFlag TODO: Change back
-	xSemaphoreGiveFromISR(maintenanceModeFlag_mutex, NULL);
+	unsigned int maintModeFlag_local = 0;
+	if (xSemaphoreTakeFromISR(maintenanceModeFlag_mutex, 10) == pdTRUE)
+	{
+		maintModeFlag_local = maintenanceModeFlag;
+		xSemaphoreGiveFromISR(maintenanceModeFlag_mutex, NULL);
+	}
 
 	// If key is pressed & maintenance mode
 	if ((status == 0 ) && (maintModeFlag_local))
@@ -279,51 +316,51 @@ static void load_manage(void *pvParameters) {
 		*/
 	}
 }
-
-static void shedLogic(void *pvParameters) {
-
-	unsigned int PrevInstabilityFlag;
-	// Flag for shedding
-	int loadShedStatus;
-	//flag for monitor
-	int monitorMode;
-
-	LEDStruct Led2Send;
-
-if (xSemaphoreTake(maintenanceModeFlag_mutex) == pdTRUE) {
-	if (!maintenanceModeFlag) {
-
-	if (xSemaphoreTake(MonitorTimer_sem)) {
-		if (xSemaphoreTake(InStabilityFlag_mutex) == pdTRUE) {
-				if (InStabilityFlag) {
-					 LoadShed();
-				}
-				else {
-					 LoadConnect();
-				}
-			}
-		}
-	}
-}
-}
-
-static void MonitorTimer(void *pvParameters) {
-	unsigned int PrevInstabilityFlag;
-
-	if ( xSemaphoreTake(MonitorMode_sem) == pdTRUE && monitorMode) {
-		if ( xSemaphoreTake(InStabilityFlag_mutex) == pdTRUE) {
-
-		 if (PrevInstabilityFlag != InStabilityFlag ) {
-				if (xTimerReset(MonitoringTimer) == pdTRUE) {
-					PrevInstabilityFlag = InStabilityFlag;
-				} else {
-					printf("Timer cannot be reset");
-				}
-
-			}
-		}
-	}
-}
+//
+//static void shedLogic(void *pvParameters) {
+//
+//	unsigned int PrevInstabilityFlag;
+//	// Flag for shedding
+//	int loadShedStatus;
+//	//flag for monitor
+//	int monitorMode;
+//
+//	LEDStruct Led2Send;
+//
+//if (xSemaphoreTake(maintenanceModeFlag_mutex) == pdTRUE) {
+//	if (!maintenanceModeFlag) {
+//
+//	if (xSemaphoreTake(MonitorTimer_sem)) {
+//		if (xSemaphoreTake(InStabilityFlag_mutex) == pdTRUE) {
+//				if (InStabilityFlag) {
+//					 LoadShed();
+//				}
+//				else {
+//					 LoadConnect();
+//				}
+//			}
+//		}
+//	}
+//}
+//}
+//
+//static void MonitorTimer(void *pvParameters) {
+//	unsigned int PrevInstabilityFlag;
+//
+//	if ( xSemaphoreTake(MonitorMode_sem) == pdTRUE && monitorMode) {
+//		if ( xSemaphoreTake(InStabilityFlag_mutex) == pdTRUE) {
+//
+//		 if (PrevInstabilityFlag != InStabilityFlag ) {
+//				if (xTimerReset(MonitoringTimer) == pdTRUE) {
+//					PrevInstabilityFlag = InStabilityFlag;
+//				} else {
+//					printf("Timer cannot be reset");
+//				}
+//
+//			}
+//		}
+//	}
+//}
 
 static void LEDcontrol(void *pvParameters) {
 	LEDStruct Temp;
@@ -342,56 +379,56 @@ static void LEDcontrol(void *pvParameters) {
 		}
 	}
 }
-
-static void LoadConnect() {
-	LEDStruct temp;
-
-	temp.Green = SystemState.Green;
-	temp.Red = SystemState.Red;
-
-    if (!temp.Green) {
-        return 0;
-	}
-
-    unsigned int ret = 1;
-
-	// Start from bit 7 instead
-
-    while (temp.Green >>= 1) {
-        ret <<= 1;
-	}
-
-	temp.Green -= ret; 
-	temp.Red += ret;
-
-	if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
-		;
-	}
-	
-}
-
-static void LoadShed() {
-	LEDStruct temp;
-
-	temp.Green = SystemState.Green;
-	temp.Red = SystemState.Red;
-
-	 if (!temp.Red) {
-        return 0;
-	}
-	int num = 1;
-
-	while (temp.Red & num != 1){
-		num <<= 1;
-	}
-
-	temp.Red -= ret;
-	temp.Green += ret;
-
-	if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
-		;
-	} 
-}
+//
+//static void LoadConnect() {
+//	LEDStruct temp;
+//
+//	temp.Green = SystemState.Green;
+//	temp.Red = SystemState.Red;
+//
+//    if (!temp.Green) {
+//        return 0;
+//	}
+//
+//    unsigned int ret = 1;
+//
+//	// Start from bit 7 instead
+//
+//    while (temp.Green >>= 1) {
+//        ret <<= 1;
+//	}
+//
+//	temp.Green -= ret;
+//	temp.Red += ret;
+//
+//	if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
+//		;
+//	}
+//
+//}
+//
+//static void LoadShed() {
+//	LEDStruct temp;
+//
+//	temp.Green = SystemState.Green;
+//	temp.Red = SystemState.Red;
+//
+//	 if (!temp.Red) {
+//        return 0;
+//	}
+//	int num = 1;
+//
+//	while (temp.Red & num != 1){
+//		num <<= 1;
+//	}
+//
+//	temp.Red -= ret;
+//	temp.Green += ret;
+//
+//	if (xQueueSend(LEDQ,&temp,10) == pdTRUE) {
+//		;
+//	}
+//}
 
 static void WallSwitchPoll(void *pvParameters) {
 
@@ -474,12 +511,6 @@ void StabilityControlCheck(void *pvParameters)
 			rocLocal = rateOfChange;
 			xSemaphoreGive(roc_mutex);
 
-			// Send current frequency to VGA Display Task if queue isn't full
-			if (uxQueueSpacesAvailable(vgaFreqQ) != 0)
-			{
-				xQueueSend(vgaFreqQ, &newCount, 0);
-			}
-
 			// Obtain copies of global threshold values
 			xSemaphoreTake(lowerFreqBound_mutex, portMAX_DELAY);
 			lowerFreqBound_local = lowerFreqBound;
@@ -497,15 +528,19 @@ void StabilityControlCheck(void *pvParameters)
 				if ((newFreq < lowerFreqBound_local) || (rocLocal > rocBound_local))
 				{
 					InStabilityFlag = 1;
+//					printf("SYSTEM BECOMING UNSTABLE\n");
+//					usleep(100);
 				}
 			}
 			// Check unstable system for stability
 			else
 			{
-				// Check if current freq is under lower threshold OR rate of change too high
+				// Check if current freq is above low threshold AND rate of change is low
 				if ((newFreq >= lowerFreqBound_local) && (rocLocal <= rocBound_local))
 				{
 					InStabilityFlag = 0;
+//					printf("SYSTEM BECOMING stable\n");
+//					usleep(100);
 				}
 			}
 			xSemaphoreGive(InStabilityFlag_mutex);
@@ -516,31 +551,190 @@ void StabilityControlCheck(void *pvParameters)
 }
 
 // Receives frequency information, displays to VGA
-void VGADisplayTask(void *pvParameters)
-{
-	// Stores latest ADC Count, frequency from StabilityControlChecker, and rate of change from global variable
-	unsigned int newCount = 0;
-	double newFreq = 0;
-	double roc_local = 0;
+void PRVGADraw_Task(void *pvParameters ){
+	//initialize VGA controllers
+	alt_up_pixel_buffer_dma_dev *pixel_buf;
+	pixel_buf = alt_up_pixel_buffer_dma_open_dev(VIDEO_PIXEL_BUFFER_DMA_NAME);
+	if(pixel_buf == NULL){
+		printf("can't find pixel buffer device\n");
+	}
+	alt_up_pixel_buffer_dma_clear_screen(pixel_buf, 0);
 
-	// TODO: Do we need an array to store old values for freq/count?
+	alt_up_char_buffer_dev *char_buf;
+	char_buf = alt_up_char_buffer_open_dev("/dev/video_character_buffer_with_dma");
+	if(char_buf == NULL){
+		printf("can't find char buffer device\n");
+	}
+	alt_up_char_buffer_clear(char_buf);
 
-	while (1)
-	{
-		// Receive new ADC Count
-		if (xQueueReceive(vgaFreqQ, &newCount, portMAX_DELAY) == pdPASS)
-		{
-			// Calculate current frequency of system
-			newFreq = 16000/(double)newCount;
+	//Set up plot axes
+	alt_up_pixel_buffer_dma_draw_hline(pixel_buf, 100, 590, 200, ((0x3ff << 20) + (0x3ff << 10) + (0x3ff)), 0);
+	alt_up_pixel_buffer_dma_draw_hline(pixel_buf, 100, 590, 300, ((0x3ff << 20) + (0x3ff << 10) + (0x3ff)), 0);
+	alt_up_pixel_buffer_dma_draw_vline(pixel_buf, 100, 50, 200, ((0x3ff << 20) + (0x3ff << 10) + (0x3ff)), 0);
+	alt_up_pixel_buffer_dma_draw_vline(pixel_buf, 100, 220, 300, ((0x3ff << 20) + (0x3ff << 10) + (0x3ff)), 0);
 
-			// Store global rate of change locally
-			xSemaphoreTake(roc_mutex, portMAX_DELAY);
-			roc_local = rateOfChange;
-			xSemaphoreGive(roc_mutex);
+	alt_up_char_buffer_string(char_buf, "Frequency(Hz)", 4, 4);
+	alt_up_char_buffer_string(char_buf, "52", 10, 7);
+	alt_up_char_buffer_string(char_buf, "50", 10, 12);
+	alt_up_char_buffer_string(char_buf, "48", 10, 17);
+	alt_up_char_buffer_string(char_buf, "46", 10, 22);
 
-			// Send data to monitor
-			// TODO: All displaying info and shit here
+	alt_up_char_buffer_string(char_buf, "df/dt(Hz/s)", 4, 26);
+	alt_up_char_buffer_string(char_buf, "30", 10, 28);
+	alt_up_char_buffer_string(char_buf, "15", 10, 30);
+	alt_up_char_buffer_string(char_buf, "0", 10, 32);
+	alt_up_char_buffer_string(char_buf, "-15", 9, 34);
+	alt_up_char_buffer_string(char_buf, "-30", 9, 36);
+
+	double freq[100], dfreq[100];
+	unsigned int tempCount;
+	int i = 99, j = 0;
+	Line line_freq, line_roc;
+
+	// Print base miscellaneous text
+	char str[100];
+	sprintf(str, "Low Freq Threshold: %7.2f Hz", 1234.0);
+	alt_up_char_buffer_string(char_buf, str, 5, 45);
+	sprintf(str, "RoC Threshold: %7.2f Hz/sec", 1234.0);
+	alt_up_char_buffer_string(char_buf, str, 5, 49);
+	alt_up_char_buffer_string(char_buf, "System Status: DEFAULT", 5, 41);
+
+	// Integer represents what system status currently is
+	unsigned int systemStatus = 0;
+	unsigned int prev_systemStatus = 0;
+
+	// Local copy of instability flag
+	unsigned int instableFlag_local = 0;
+
+	// Local copy of maintenance mode flag
+	unsigned int maintFlag_local = 0;
+
+	while(1){
+
+		//receive frequency data from queue
+		while(uxQueueMessagesWaiting( Q_freq_data ) != 0){
+			xQueueReceive( Q_freq_data, &tempCount, 0 );
+			freq[i] = 16000/(double)tempCount;
+
+			// Calculate frequency RoC
+			if(i==0){
+				dfreq[0] = (freq[0]-freq[99]) * 2.0 * freq[0] * freq[99] / (freq[0]+freq[99]);
+			}
+			else{
+				dfreq[i] = (freq[i]-freq[i-1]) * 2.0 * freq[i]* freq[i-1] / (freq[i]+freq[i-1]);
+			}
+
+			if (dfreq[i] > 100.0){
+				dfreq[i] = 100.0;
+			}
+
+
+			i =	++i%100; //point to the next data (oldest) to be overwritten
+
 		}
+
+		//clear old graph to draw new graph
+		alt_up_pixel_buffer_dma_draw_box(pixel_buf, 101, 0, 639, 199, 0, 0);
+		alt_up_pixel_buffer_dma_draw_box(pixel_buf, 101, 201, 639, 299, 0, 0);
+
+		for(j=0;j<99;++j)
+		{ //i here points to the oldest data, j loops through all the data to be drawn on VGA
+			if (((int)(freq[(i+j)%100]) > MIN_FREQ) && ((int)(freq[(i+j+1)%100]) > MIN_FREQ))
+			{
+				//Calculate coordinates of the two data points to draw a line in between
+				//Frequency plot
+				line_freq.x1 = FREQPLT_ORI_X + FREQPLT_GRID_SIZE_X * j;
+				line_freq.y1 = (int)(FREQPLT_ORI_Y - FREQPLT_FREQ_RES * (freq[(i+j)%100] - MIN_FREQ));
+
+				line_freq.x2 = FREQPLT_ORI_X + FREQPLT_GRID_SIZE_X * (j + 1);
+				line_freq.y2 = (int)(FREQPLT_ORI_Y - FREQPLT_FREQ_RES * (freq[(i+j+1)%100] - MIN_FREQ));
+
+				//Frequency RoC plot
+				line_roc.x1 = ROCPLT_ORI_X + ROCPLT_GRID_SIZE_X * j;
+				line_roc.y1 = (int)(ROCPLT_ORI_Y - ROCPLT_ROC_RES * dfreq[(i+j)%100]);
+
+				line_roc.x2 = ROCPLT_ORI_X + ROCPLT_GRID_SIZE_X * (j + 1);
+				line_roc.y2 = (int)(ROCPLT_ORI_Y - ROCPLT_ROC_RES * dfreq[(i+j+1)%100]);
+
+				//Draw
+				alt_up_pixel_buffer_dma_draw_line(pixel_buf, line_freq.x1, line_freq.y1, line_freq.x2, line_freq.y2, 0x3ff << 0, 0);
+				alt_up_pixel_buffer_dma_draw_line(pixel_buf, line_roc.x1, line_roc.y1, line_roc.x2, line_roc.y2, 0x3ff << 0, 0);
+			}
+		}
+
+		// Check if currently in maintenance
+		if (xSemaphoreTake(maintenanceModeFlag_mutex, portMAX_DELAY) == pdTRUE)
+		{
+			maintFlag_local =  maintenanceModeFlag;
+			xSemaphoreGive(maintenanceModeFlag_mutex);
+		}
+
+		// Check if currently unstable
+		if (xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY) == pdTRUE)
+		{
+			instableFlag_local = InStabilityFlag;
+			xSemaphoreGive(InStabilityFlag_mutex);
+		}
+
+		// Update system status based on priority
+		if (maintFlag_local == 1)
+		{
+			// Maintenance
+			prev_systemStatus = systemStatus;
+			systemStatus = 2;
+//			printf("System is in maintenance\n");
+//			usleep(100);
+		}
+		else if (instableFlag_local == 1)
+		{
+			// Unstable
+			prev_systemStatus = systemStatus;
+			systemStatus = 1;
+//			printf("System is unstable\n");
+//			usleep(100);
+		}
+		else
+		{
+			// Stable
+			prev_systemStatus = systemStatus;
+			systemStatus = 0;
+//			printf("System is stable\n");
+//			usleep(100);
+		}
+
+		// Check if system state has just changed and screen must be updated
+		if (prev_systemStatus != systemStatus)
+		{
+			// Update screen based on systemStatus
+			if (systemStatus == 2)
+			{
+				alt_up_char_buffer_string(char_buf, "MAINTENANCE  ", 20, 41);
+//				printf("System just entered maintenance\n");
+//				usleep(100);
+			}
+			else if (systemStatus == 1)
+			{
+				alt_up_char_buffer_string(char_buf, "UNSTABLE     ", 20, 41);
+//				printf("System just became unstable\n");
+//				usleep(100);
+			}
+			else
+			{
+				alt_up_char_buffer_string(char_buf, "STABLE       ", 20, 41);
+//				printf("System just became stable\n");
+//				usleep(100);
+			}
+
+			// Update prev_systemStatus
+			prev_systemStatus = systemStatus;
+		}
+
+		// Display information on system response times
+		// Display 5 most recent measurements
+		// Display min and maximum time taken
+		// Display average time taken
+		// Display total time system has been active
+
 	}
 }
 
@@ -802,21 +996,21 @@ double array2double(unsigned int *newVal)
 
 // Creates all tasks used
 int CreateTasks() {
-	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
-	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 2, NULL);
-	xTaskCreate(VGADisplayTask, "VGADisplay", TASK_STACKSIZE, NULL, 3, NULL);
-	xTaskCreate(load_manage,"LDM",TASK_STACKSIZE,NULL,4,NULL);
-	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,5,NULL);
-	xTaskCreate(KeyboardReader, "KeyboardReader", TASK_STACKSIZE, NULL, 6, NULL);
-	xTaskCreate(LCDUpdater, "LCDUpdater", TASK_STACKSIZE, NULL, 7, NULL);
+	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, xWallSwitchPoll);
+	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 3, xStabilityControlCheck);
+	xTaskCreate(PRVGADraw_Task, "PRVGADraw_Task", TASK_STACKSIZE, NULL, 2, xPRVGADraw_Task);
+	xTaskCreate(load_manage,"LDM",TASK_STACKSIZE,NULL,4,xload_manage);
+	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,5,xLEDcontrol);
+	xTaskCreate(KeyboardReader, "KeyboardReader", TASK_STACKSIZE, NULL, 6, xKeyboardReader);
+	xTaskCreate(LCDUpdater, "LCDUpdater", TASK_STACKSIZE, NULL, 7, xLCDUpdater);
 	return 0;
 }
 
 // Creates all timers used
-int CreateTimers() {
-	MonitoringTimer = xTimerCreate("MT", 500, pdTRUE, NULL , vMonitoringTimerCallback);
-	return 0;
-}
+//int CreateTimers() {
+//	MonitoringTimer = xTimerCreate("MT", 500, pdTRUE, NULL , vMonitoringTimerCallback);
+//	return 0;
+//}
 
 // Initialises all data structures used
 int OSDataInit() {
@@ -824,8 +1018,8 @@ int OSDataInit() {
 	SwitchQ = xQueueCreate( 100, sizeof(unsigned int) );
 	newFreqQ = xQueueCreate(10, sizeof( void* ));
 	LEDQ = xQueueCreate(100, sizeof(LEDStruct));
-	vgaFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 	keyboardQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
+	Q_freq_data = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 
 	// Initialise Semaphores
 	lcdUpdate_sem = xSemaphoreCreateBinary();
