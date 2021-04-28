@@ -206,7 +206,7 @@ void ps2_isr (void* context, alt_u32 id){
 
 	// Create local copy of maintenanceModeFlag
 	unsigned int maintModeFlag_local = 0;
-	if (xSemaphoreTakeFromISR(maintenanceModeFlag_mutex, 10) == pdTRUE)
+	if (xSemaphoreTakeFromISR(maintenanceModeFlag_mutex, portMAX_DELAY) == pdTRUE)
 	{
 		maintModeFlag_local = maintenanceModeFlag;
 		xSemaphoreGiveFromISR(maintenanceModeFlag_mutex, NULL);
@@ -586,6 +586,11 @@ void PRVGADraw_Task(void *pvParameters ){
 	sprintf(str, "RoC Threshold: %7.2f Hz/sec", 1234.0);
 	alt_up_char_buffer_string(char_buf, str, 5, 49);
 	alt_up_char_buffer_string(char_buf, "System Status: DEFAULT", 5, 41);
+	alt_up_char_buffer_string(char_buf, "Avg Response Time: x", 25, 41);
+	alt_up_char_buffer_string(char_buf, "Min Response Time: x", 27, 41);
+	alt_up_char_buffer_string(char_buf, "Max Response Time: x", 29, 41);
+	alt_up_char_buffer_string(char_buf, "Last 5 Response Times: x", 31, 41);
+	alt_up_char_buffer_string(char_buf, "System Uptime: x", 33, 41);
 
 	// Integer represents what system status currently is
 	unsigned int systemStatus = 0;
