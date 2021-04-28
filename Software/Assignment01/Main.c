@@ -96,7 +96,7 @@ SemaphoreHandle_t roc_mutex;
 QueueHandle_t keyboardQ;
 
 // Lower frequency bound
-double lowerFreqBound = 49; // TODO: Choose a default lowerFreqBound
+double lowerFreqBound = 50; // TODO: Choose a default lowerFreqBound
 // Mutex for protecting lower frequency bound
 SemaphoreHandle_t lowerFreqBound_mutex;
 // Absolute rate of change bound
@@ -312,15 +312,30 @@ void LoadManagement(void *pvParameters) {
 
 			//xSemaphoreGive(maintenanceModeFlag_mutex);
 
-			//if (xSemaphoreTake(MonitorMode_sem, portMAX_DELAY) == pdTRUE) {
+			if (xSemaphoreTake(MonitorMode_sem, 65) == pdTRUE) {
+				printf("Moniter mode : %d \n",monitorMode);
 
 				if (!monitorMode) {
+					//Normal Mode
+					xSemaphoreGive(MonitorMode_sem);
+
 					if (oneshot) {
 						oneshot = 0;
 						oneshotSample();
 					}
-					//Normal Mode
-					if (xQueueReceive(SwitchQ, &temp, portMAX_DELAY) == pdTRUE) {
+
+					xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY);
+						//Checking Instability whilst in NOrmal operation
+						if (InStabilityFlag) {
+							//LoadShed();
+							xTimerStart(MonitoringTimer, 0);
+							monitorMode = 1;
+						}
+
+					xSemaphoreGive(InStabilityFlag_mutex);
+
+					
+					if (xQueueReceive(SwitchQ, &temp, 40) == pdTRUE) {
 
 						xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
 						SystemState.Red = temp;
@@ -331,26 +346,18 @@ void LoadManagement(void *pvParameters) {
 						if (xQueueSend(LEDQ,&state2send,40) == pdTRUE) {
 							printf("Sent!!! \n");
 						}
-
-						xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY);
-						//Checking Instability whilst in NOrmal operation
-						if (InStabilityFlag) {
-							//LoadShed();
-							xTimerStart(MonitoringTimer, 0);
-							monitorMode = 1;
-						}
-
-						xSemaphoreGive(InStabilityFlag_mutex);
 					}
 
 				} else {
+					xSemaphoreGive(MonitorMode_sem);
+
 					//Moniter Semaphore Running
 					xSemaphoreGive(monitorTimerControl_sem);
 					
 					if (xQueueReceive(SwitchQ,&temp, 50) == pdTRUE) {
 						oneshot = 1;
 
-						if (xSemaphoreTake(SystemState_mutex,portMAX_DELAY) == pdTRUE ) {
+						if (xSemaphoreTake(SystemState_mutex,50) == pdTRUE ) {
 						//If maybe redundant here
 
 								SystemState.Red = SystemState.Red & temp;
@@ -364,8 +371,7 @@ void LoadManagement(void *pvParameters) {
 						}
 					}
 				}
-			//	xSemaphoreGive(MonitorMode_sem);
-			//}
+			}
 			
 		/*} else {
 			//Maintenance Mode
@@ -946,6 +952,7 @@ int OSDataInit() {
 	rocBound_mutex = xSemaphoreCreateMutex();
 	whichBoundFlag_mutex = xSemaphoreCreateMutex();
 	SystemState_mutex = xSemaphoreCreateMutex();
+	MonitorMode_sem = xSemaphoreCreateMutex();
 
 	return 0;
 }
