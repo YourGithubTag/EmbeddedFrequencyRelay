@@ -99,7 +99,7 @@ SemaphoreHandle_t roc_mutex;
 QueueHandle_t keyboardQ;
 
 // Lower frequency bound
-double lowerFreqBound = 48.2; // TODO: Choose a default lowerFreqBound
+double lowerFreqBound = 49; // TODO: Choose a default lowerFreqBound
 // Mutex for protecting lower frequency bound
 SemaphoreHandle_t lowerFreqBound_mutex;
 // Absolute rate of change bound
@@ -121,7 +121,7 @@ SemaphoreHandle_t lcdUpdate_sem;
 SemaphoreHandle_t monitorTimerControl_sem;
 SemaphoreHandle_t monitorSwitchLogic_sem;
 
-SemaphoreHandle_t SpeedCheckFlag_Mutex;
+SemaphoreHandle_t SpeedCheckFlag_sem;
 
 unsigned int SpeedCheckFlag = 1;
 
@@ -144,6 +144,11 @@ LEDStruct SystemState;
 unsigned int monitorMode = 0;
 
 SemaphoreHandle_t MonitorMode_sem;
+
+
+
+
+int firstShed = 1;
 
 
 /*---------- INTERRUPT SERVICE ROUTINES ----------*/
@@ -291,6 +296,7 @@ void LoadConnect() {
 }
 
 void LoadShed() {
+	firstShed = 0;
 	LEDStruct state2send;
 
 	xSemaphoreTake(SystemState_mutex, portMAX_DELAY);
@@ -340,11 +346,11 @@ void LoadManagement(void *pvParameters) {
 								oneshot = 0;
 								oneshotSample();
 
-								xSemaphoreTake(SpeedCheckFlag_Mutex,15);
-								SpeedCheckFlag = 1;
-								xSemaphoreGive(SpeedCheckFlag_Mutex);
-
+								//BACK TO NORMAL OPERATION
+								//xSemaphoreGive(SpeedCheckFlag_sem);
+								firstShed = 1;
 							}
+
 							//printf("\n NORMAL \n");
 
 							xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY);
@@ -506,22 +512,13 @@ void LEDcontrol(void *pvParameters) {
 
 			IOWR_ALTERA_AVALON_PIO_DATA(RED_LEDS_BASE, Status.Red);
 			IOWR_ALTERA_AVALON_PIO_DATA(GREEN_LEDS_BASE, Status.Green);
-			
 
-			//TIMING LOGIC
+			xSemaphoreGive(EndTimeSemaphore);
 
-			if (xSemaphoreTake(LEDTickget_sem,1) == pdTRUE) {
-				check = 1;
-			}
-
-			if (check && (Status.Green == 1) ) {
-				xSemaphoreGive(EndTimeSemaphore);
-
-				check = 0;
-			}
 
 		} else {
-			printf("Dead Que \n");
+			;
+			//printf("Dead Que \n");
 		}
 	}
 }
@@ -546,8 +543,34 @@ void WallSwitchPoll(void *pvParameters) {
 				
 				PrevSwitchValue = CurrSwitchValue;
 
- 	 vTaskDelay(100);
+ 	 vTaskDelay(10);
 	}
+
+}
+
+void reactionTimer(void *pvParameters){
+
+	int startTime;
+	int endTime;
+
+	while (1){
+
+		if (xSemaphoreTake(SpeedCheckFlag_sem,1) == pdTRUE){
+			if (firstShed){
+				startTime = (int) xTaskGetTickCount();
+				printf("start time: %d \n", startTime);
+			}
+		}
+
+	 	if (xSemaphoreTake(EndTimeSemaphore, 1) == pdTRUE) {
+			 if (firstShed) {
+			endTime = (int) xTaskGetTickCount();
+			printf("end Time: %d \n", endTime);
+			printf("Time Difference: %d", (endTime - startTime));
+			 }
+		}
+	}
+
 
 }
 
@@ -584,6 +607,7 @@ void StabilityControlCheck(void *pvParameters)
 
 	while(1)
 	{
+
 		// Wait for new frequency in queue
 		if (xQueueReceive(newFreqQ, &temp, portMAX_DELAY) == pdTRUE)
 		{
@@ -624,17 +648,7 @@ void StabilityControlCheck(void *pvParameters)
 				if ((newFreq < lowerFreqBound_local) || (rocLocal > rocBound_local))
 				{
 					InStabilityFlag = 1;
-
-					xSemaphoreTake(SpeedCheckFlag_Mutex,1);
-
-					if (SpeedCheckFlag) {
-						SpeedCheckFlag = 0;
-						startTime = (int) xTaskGetTickCount();
-						
-						xSemaphoreGive(LEDTickget_sem);
-					}
-
-					xSemaphoreGive(SpeedCheckFlag_Mutex);
+					xSemaphoreGive(SpeedCheckFlag_sem);
 
 				}
 			}
@@ -650,11 +664,6 @@ void StabilityControlCheck(void *pvParameters)
 			}
 			xSemaphoreGive(InStabilityFlag_mutex);
 
-		}
-
-		if (xSemaphoreTake(EndTimeSemaphore, 1) == pdTRUE) {
-			endTime = (int) xTaskGetTickCount();
-			printf("Time Difference: %d", (endTime - startTime));
 		}
 	}
 
@@ -951,11 +960,11 @@ int CreateTasks() {
 
 	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
 
-	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 6, NULL);
+	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 7, NULL);
 
 	//xTaskCreate(VGADisplayTask, "VGADisplay", TASK_STACKSIZE, NULL, 3, NULL);
 
-	xTaskCreate(LoadManagement,"LDM",TASK_STACKSIZE,NULL,5,NULL);
+	xTaskCreate(LoadManagement,"LDM",TASK_STACKSIZE,NULL,6,NULL);
 
 	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,2,NULL);
 
@@ -963,11 +972,13 @@ int CreateTasks() {
 
 	//xTaskCreate(LCDUpdater, "LCDUpdater", TASK_STACKSIZE, NULL, 7, NULL);
 
-	xTaskCreate(MonitorLogic, "ML",TASK_STACKSIZE, NULL, 4, NULL);
+	xTaskCreate(MonitorLogic, "ML",TASK_STACKSIZE, NULL, 5, NULL);
 
 	//xTaskCreate(MonitorSwitchLogic,"SML",TASK_STACKSIZE, NULL, 4, NULL);
 
-	xTaskCreate(MonitorTimer, "MT",TASK_STACKSIZE, NULL, 3, NULL);
+	xTaskCreate(MonitorTimer, "MT",TASK_STACKSIZE, NULL, 4, NULL);
+
+	xTaskCreate(reactionTimer,"RT", TASK_STACKSIZE, NULL,3, NULL);
 
 	printf("All tasks made Okay! \n");
 
@@ -996,6 +1007,7 @@ int OSDataInit() {
 	MonitorTimer_sem = xSemaphoreCreateBinary();
 	LEDTickget_sem = xSemaphoreCreateBinary();
 	EndTimeSemaphore = xSemaphoreCreateBinary();
+	SpeedCheckFlag_sem = xSemaphoreCreateBinary();
 
 	// Initialise mutexes
 	roc_mutex = xSemaphoreCreateMutex();
@@ -1006,7 +1018,6 @@ int OSDataInit() {
 	whichBoundFlag_mutex = xSemaphoreCreateMutex();
 	SystemState_mutex = xSemaphoreCreateMutex();
 	MonitorMode_sem = xSemaphoreCreateMutex();
-	SpeedCheckFlag_Mutex = xSemaphoreCreateMutex();
 
 	return 0;
 }
