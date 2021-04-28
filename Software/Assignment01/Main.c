@@ -309,7 +309,7 @@ void LoadShed() {
 void LoadManagement(void *pvParameters) {
 	unsigned int temp;
 	LEDStruct state2send;
-	int oneshot = 0;
+	int oneshot = 1;
 	
 	while (1) {
 		//TODO: Debug problems with Switch not updating the state fully
@@ -324,25 +324,27 @@ void LoadManagement(void *pvParameters) {
 					if (!monitorMode) {
 						//Normal Mode
 
-						if (oneshot) {
-							oneshot = 0;
-							oneshotSample();
-						}
+							if (oneshot) {
+								oneshot = 0;
+								oneshotSample();
+							}
 
 							xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY);
 							//Checking Instability whilst in NOrmal operation
 							if (InStabilityFlag) {
 
 								xSemaphoreGive(InStabilityFlag_mutex);
-								xSemaphoreGive(MonitorMode_sem);
 								LoadShed();
 								xTimerStart(MonitoringTimer, 0);
 								monitorMode = 1;
+								
+								xSemaphoreGive(MonitorMode_sem);
 
 							} else {
 
 								xSemaphoreGive(InStabilityFlag_mutex);
 								xSemaphoreGive(MonitorMode_sem);
+
 								if (xQueueReceive(SwitchQ, &temp, 40) == pdTRUE) {
 
 									xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
@@ -356,7 +358,6 @@ void LoadManagement(void *pvParameters) {
 									}
 								}	
 							}
-
 					} else {
 						//MONITOR!!!!!
 
@@ -380,7 +381,7 @@ void LoadManagement(void *pvParameters) {
 									state2send = SystemState;
 
 									xQueueSend(LEDQ,&state2send,40);
-								
+							
 									xSemaphoreGive(SystemState_mutex);
 							}
 						}
@@ -401,9 +402,9 @@ void LoadManagement(void *pvParameters) {
 					xQueueSend(LEDQ,&state2send,40);
 					xSemaphoreGive(SystemState_mutex);
 				}
-
 			}
 		}
+		xSemaphoreGive(maintenanceModeFlag_mutex);
 	}
 }
 
@@ -445,19 +446,17 @@ void MonitorTimer(void *pvParameters) {
 		if (xSemaphoreTake(monitorTimerControl_sem, portMAX_DELAY) == pdTRUE) {
 
 			if ( xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY) == pdTRUE) {
-
 				if (PrevInstabilityFlag != InStabilityFlag ) {
 
-					//WARN MADE THIS CHANGE TO INSTANTLY GIVE THE SEMAPHORE
 					PrevInstabilityFlag = InStabilityFlag;
 					xSemaphoreGive(InStabilityFlag_mutex);
 
-					if (xTimerReset(MonitoringTimer, portMAX_DELAY) == pdTRUE) {
-						;
-					} else {
-						printf("Timer cannot be reset");
-					}
+					if (xTimerReset(MonitoringTimer, portMAX_DELAY) != pdTRUE) {
+							printf("Timer cannot be reset");
+					} 
 
+				} else {
+					xSemaphoreGive(InStabilityFlag_mutex);
 				}
 			}
 		}
@@ -479,8 +478,9 @@ void MonitorLogic(void *pvParameters) {
 					printf("Stable\n");
 				}
 				//WARN MADE THIS CHANGE TO GIVE RIGHT AFTER IF
+				xSemaphoreGive(InStabilityFlag_mutex);
 			}
-			xSemaphoreGive(InStabilityFlag_mutex);
+
 		}
 	}
 }
