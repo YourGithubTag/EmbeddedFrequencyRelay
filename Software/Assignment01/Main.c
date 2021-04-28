@@ -26,6 +26,9 @@
 #include "unistd.h"
 #include "altera_up_avalon_ps2.h"
 #include "altera_up_ps2_keyboard.h"
+#include <altera_avalon_timer.h>
+
+#include "alt_types.h"        
 
 
 
@@ -112,10 +115,19 @@ SemaphoreHandle_t whichBoundFlag_mutex;
 SemaphoreHandle_t lcdUpdate_sem;
 
 
+
 //Semaphore for monitoring mode
 
 SemaphoreHandle_t monitorTimerControl_sem;
 SemaphoreHandle_t monitorSwitchLogic_sem;
+
+SemaphoreHandle_t SpeedCheckFlag_Mutex;
+
+unsigned int SpeedCheckFlag = 1;
+
+SemaphoreHandle_t LEDTickget_sem;
+
+SemaphoreHandle_t EndTimeSemaphore;
 
 
 /*---------- FUNCTION DECLARATIONS ----------*/
@@ -327,6 +339,11 @@ void LoadManagement(void *pvParameters) {
 							if (oneshot) {
 								oneshot = 0;
 								oneshotSample();
+
+								xSemaphoreTake(SpeedCheckFlag_Mutex,15);
+								SpeedCheckFlag = 1;
+								xSemaphoreGive(SpeedCheckFlag_Mutex);
+
 							}
 							//printf("\n NORMAL \n");
 
@@ -444,7 +461,7 @@ void MonitorTimer(void *pvParameters) {
 
 					PrevInstabilityFlag = InStabilityFlag;
 					xSemaphoreGive(InStabilityFlag_mutex);
-					printf("Timer Flip\n");
+					//printf("Timer Flip\n");
 
 					if (xTimerReset(MonitoringTimer, portMAX_DELAY) != pdTRUE) {
 							printf("Timer cannot be reset");
@@ -482,11 +499,26 @@ void MonitorLogic(void *pvParameters) {
 
 void LEDcontrol(void *pvParameters) {
 	LEDStruct Status;
+
+	int check = 0;
 	while (1) {
 		if (xQueueReceive(LEDQ, &Status, portMAX_DELAY ) == pdTRUE ) {
 
 			IOWR_ALTERA_AVALON_PIO_DATA(RED_LEDS_BASE, Status.Red);
 			IOWR_ALTERA_AVALON_PIO_DATA(GREEN_LEDS_BASE, Status.Green);
+			
+
+			//TIMING LOGIC
+
+			if (xSemaphoreTake(LEDTickget_sem,1) == pdTRUE) {
+				check = 1;
+			}
+
+			if (check && (Status.Green == 1) ) {
+				xSemaphoreGive(EndTimeSemaphore);
+
+				check = 0;
+			}
 
 		} else {
 			printf("Dead Que \n");
@@ -546,6 +578,10 @@ void StabilityControlCheck(void *pvParameters)
 	// Max absolute rate of change before system enters shedding mode
 	double rocBound_local = 0;
 
+	int startTime = 0;
+	int endTime = 0;
+
+
 	while(1)
 	{
 		// Wait for new frequency in queue
@@ -588,7 +624,18 @@ void StabilityControlCheck(void *pvParameters)
 				if ((newFreq < lowerFreqBound_local) || (rocLocal > rocBound_local))
 				{
 					InStabilityFlag = 1;
-					
+
+					xSemaphoreTake(SpeedCheckFlag_Mutex,1);
+
+					if (SpeedCheckFlag) {
+						SpeedCheckFlag = 0;
+						startTime = (int) xTaskGetTickCount();
+						
+						xSemaphoreGive(LEDTickget_sem);
+					}
+
+					xSemaphoreGive(SpeedCheckFlag_Mutex);
+
 				}
 			}
 			// Check unstable system for stability
@@ -603,6 +650,11 @@ void StabilityControlCheck(void *pvParameters)
 			}
 			xSemaphoreGive(InStabilityFlag_mutex);
 
+		}
+
+		if (xSemaphoreTake(EndTimeSemaphore, 1) == pdTRUE) {
+			endTime = (int) xTaskGetTickCount();
+			printf("Time Difference: %d", (endTime - startTime));
 		}
 	}
 
@@ -942,6 +994,8 @@ int OSDataInit() {
 	monitorTimerControl_sem = xSemaphoreCreateBinary();
 	monitorSwitchLogic_sem = xSemaphoreCreateBinary();
 	MonitorTimer_sem = xSemaphoreCreateBinary();
+	LEDTickget_sem = xSemaphoreCreateBinary();
+	EndTimeSemaphore = xSemaphoreCreateBinary();
 
 	// Initialise mutexes
 	roc_mutex = xSemaphoreCreateMutex();
@@ -952,6 +1006,7 @@ int OSDataInit() {
 	whichBoundFlag_mutex = xSemaphoreCreateMutex();
 	SystemState_mutex = xSemaphoreCreateMutex();
 	MonitorMode_sem = xSemaphoreCreateMutex();
+	SpeedCheckFlag_Mutex = xSemaphoreCreateMutex();
 
 	return 0;
 }
