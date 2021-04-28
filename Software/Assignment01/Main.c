@@ -96,11 +96,11 @@ SemaphoreHandle_t roc_mutex;
 QueueHandle_t keyboardQ;
 
 // Lower frequency bound
-double lowerFreqBound = 50; // TODO: Choose a default lowerFreqBound
+double lowerFreqBound = 48.2; // TODO: Choose a default lowerFreqBound
 // Mutex for protecting lower frequency bound
 SemaphoreHandle_t lowerFreqBound_mutex;
 // Absolute rate of change bound
-double rocBound = 9; // TODO: Choose a default rocBound
+double rocBound = 20; // TODO: Choose a default rocBound
 // Mutex for protecting rate of change bound
 SemaphoreHandle_t rocBound_mutex;
 /// whichBoundFlag represents which parameter is currently being edited, 0 = lowerFreqBound, 1 = rocBound)
@@ -162,6 +162,7 @@ void Button_ISR (void* context, alt_u32 id) {
 
 void vMonitoringTimerCallback(TimerHandle_t timer) {
 	xSemaphoreGiveFromISR(MonitorTimer_sem,NULL);
+	
 }
 
 // ISR for handling PS/2 keyboard presses
@@ -231,6 +232,7 @@ void oneshotSample(void) {
 
 	int CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE);
 	CurrSwitchValue = CurrSwitchValue & 0x7F;
+	printf("ONESHOT\n");
 
 	if (xQueueSend(SwitchQ, &CurrSwitchValue, portMAX_DELAY) != pdTRUE) {
 		printf("failed INIT switch send \n");
@@ -244,7 +246,6 @@ void LoadConnect() {
 	xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
 
 	state2send = SystemState;
-	printf("%d \n",SystemState.Green);
 
 	xSemaphoreGive(SystemState_mutex);
 
@@ -282,7 +283,6 @@ void LoadShed() {
 
 	xSemaphoreTake(SystemState_mutex, portMAX_DELAY);
 	state2send = SystemState;
-	printf("SYSTEM VALUE: %d \n",SystemState.Red);
 	xSemaphoreGive(SystemState_mutex);
 
 	if (!(state2send.Red)) {
@@ -297,7 +297,7 @@ void LoadShed() {
 		state2send.Red &= ~num;
 		state2send.Green |= num;
 
-		xSemaphoreTake(SystemState_mutex,50);
+		xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
 		SystemState = state2send;
 		xSemaphoreGive(SystemState_mutex);
 
@@ -313,13 +313,13 @@ void LoadManagement(void *pvParameters) {
 	
 	while (1) {
 		//TODO: Debug problems with Switch not updating the state fully
-		if (xSemaphoreTake(maintenanceModeFlag_mutex, portMAX_DELAY) == pdTRUE) {
+		if (xSemaphoreTake(maintenanceModeFlag_mutex, 100) == pdTRUE) {
 			if (!maintenanceModeFlag) {
 
 				xSemaphoreGive(maintenanceModeFlag_mutex);
 
 				if (xSemaphoreTake(MonitorMode_sem, 65) == pdTRUE) {
-					printf("Moniter mode : %d \n",monitorMode);
+					//printf("Moniter mode : %d \n",monitorMode);
 
 					if (!monitorMode) {
 						//Normal Mode
@@ -328,49 +328,47 @@ void LoadManagement(void *pvParameters) {
 								oneshot = 0;
 								oneshotSample();
 							}
+							//printf("\n NORMAL \n");
 
 							xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY);
 							//Checking Instability whilst in NOrmal operation
 							if (InStabilityFlag) {
-
-								xSemaphoreGive(InStabilityFlag_mutex);
+								
 								LoadShed();
 								xTimerStart(MonitoringTimer, 0);
 								monitorMode = 1;
-								
-								xSemaphoreGive(MonitorMode_sem);
 
-							} else {
+							} 
 
-								xSemaphoreGive(InStabilityFlag_mutex);
-								xSemaphoreGive(MonitorMode_sem);
+							xSemaphoreGive(InStabilityFlag_mutex);
+							xSemaphoreGive(MonitorMode_sem);
 
-								if (xQueueReceive(SwitchQ, &temp, 40) == pdTRUE) {
+							if (xQueueReceive(SwitchQ, &temp, 40) == pdTRUE) {
 
-									xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
-									SystemState.Red = temp;
-									SystemState.Green = 0;
-									state2send = SystemState;
-									xSemaphoreGive(SystemState_mutex);
+								xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
+								SystemState.Red = temp;
+								SystemState.Green = 0;
+								state2send = SystemState;
+								xSemaphoreGive(SystemState_mutex);
 
-									if (xQueueSend(LEDQ,&state2send,40) == pdTRUE) {
-										printf("Sent!!! \n");
-									}
-								}	
-							}
+								if (xQueueSend(LEDQ,&state2send,40) == pdTRUE) {
+									printf("Sent!!! \n");
+								}
+							}	
+							
 					} else {
 						//MONITOR!!!!!
 
 						xSemaphoreGive(MonitorMode_sem);
-
-						//Moniter Semaphore Running
 						xSemaphoreGive(monitorTimerControl_sem);
-						
+						//printf("GAVE SOME MONITOR SEMS");
+
+						if (!oneshot) {
+							oneshot = 1;
+						}
+
 						if (xQueueReceive(SwitchQ,&temp, 50) == pdTRUE) {
 
-							if (!oneshot) {
-								oneshot = 1;
-							}
 
 							if (xSemaphoreTake(SystemState_mutex,50) == pdTRUE ) {
 							//If maybe redundant here
@@ -391,20 +389,42 @@ void LoadManagement(void *pvParameters) {
 		} else {
 			//Maintenance Mode
 			xSemaphoreGive(maintenanceModeFlag_mutex);
+			
 			//printf("Maintenance \n");
+				if (oneshot) {
+						xTimerStop(MonitoringTimer,500);
+						
+						printf("OneShot from Maintenance! \n");
+						xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
+						oneshot = 0;
+						oneshotSample();
 
-			if (xQueueReceive(SwitchQ,&temp, 65) == pdTRUE) {
+						xQueueReceive(SwitchQ, &temp, 40);
 
-				if (xSemaphoreTake(SystemState_mutex,portMAX_DELAY)  == pdTRUE ){
+						SystemState.Red = temp;
+						SystemState.Green = 0;
+
+						xQueueSend(LEDQ,&state2send,40);
+						
+						state2send = SystemState;
+						xSemaphoreGive(SystemState_mutex);
+
+				}
+
+
+				if (xQueueReceive(SwitchQ, &temp, 40) == pdTRUE) {
+
+					xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
 					SystemState.Red = temp;
 					SystemState.Green = 0;
 					state2send = SystemState;
-					xQueueSend(LEDQ,&state2send,40);
 					xSemaphoreGive(SystemState_mutex);
+
+					if (xQueueSend(LEDQ,&state2send,40) == pdTRUE) {
+						printf("Sent from Maintenance! \n");
+					}
 				}
-			}
 		}
-		xSemaphoreGive(maintenanceModeFlag_mutex);
 	}
 }
 
@@ -413,43 +433,18 @@ void LoadManagement(void *pvParameters) {
 
 
 
-void MonitorSwitchLogic(void *pvParameters) {
-	unsigned int temp;
-	LEDStruct state2send;
-	usleep(25);
-	while (1) {
-
-		if (xSemaphoreTake(monitorSwitchLogic_sem,portMAX_DELAY) == pdTRUE) {
-
-			if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
-
-				if (xSemaphoreTake(SystemState_mutex,portMAX_DELAY) == pdTRUE ) {
-					//If maybe redundant here
-					if (temp < SystemState.Red) {
-						SystemState.Red = SystemState.Red & temp;
-						SystemState.Green = SystemState.Green & temp;
-						state2send = SystemState;
-						xQueueSend(LEDQ,&state2send,40);
-					}
-					xSemaphoreGive(SystemState_mutex);
-				}
-			}
-		}
-	}
-}
-
 void MonitorTimer(void *pvParameters) {
 	unsigned int PrevInstabilityFlag;
-	usleep(25);
 	while(1) {
 
 		if (xSemaphoreTake(monitorTimerControl_sem, portMAX_DELAY) == pdTRUE) {
 
-			if ( xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY) == pdTRUE) {
+			if ( xSemaphoreTake(InStabilityFlag_mutex, 10) == pdTRUE) {
 				if (PrevInstabilityFlag != InStabilityFlag ) {
 
 					PrevInstabilityFlag = InStabilityFlag;
 					xSemaphoreGive(InStabilityFlag_mutex);
+					printf("Timer Flip\n");
 
 					if (xTimerReset(MonitoringTimer, portMAX_DELAY) != pdTRUE) {
 							printf("Timer cannot be reset");
@@ -466,7 +461,7 @@ void MonitorTimer(void *pvParameters) {
 void MonitorLogic(void *pvParameters) {
 
 	while (1){
-
+				
 		if (xSemaphoreTake(MonitorTimer_sem,portMAX_DELAY) == pdTRUE) {
 			if (xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY) == pdTRUE){
 
@@ -477,10 +472,9 @@ void MonitorLogic(void *pvParameters) {
 					LoadConnect();
 					printf("Stable\n");
 				}
-				//WARN MADE THIS CHANGE TO GIVE RIGHT AFTER IF
+
 				xSemaphoreGive(InStabilityFlag_mutex);
 			}
-
 		}
 	}
 }
@@ -938,7 +932,7 @@ int CreateTimers() {
 int OSDataInit() {
 	// Initialise queues
 	SwitchQ = xQueueCreate(40, sizeof(unsigned int) );
-	LEDQ = xQueueCreate(30, sizeof(LEDStruct));
+	LEDQ = xQueueCreate(50, sizeof(LEDStruct));
 	newFreqQ = xQueueCreate(10, sizeof( void* ));
 	vgaFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 	keyboardQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
