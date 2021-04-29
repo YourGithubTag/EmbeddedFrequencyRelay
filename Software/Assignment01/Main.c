@@ -25,10 +25,11 @@
 #include "altera_avalon_pio_regs.h"
 #include "unistd.h"
 #include "altera_up_avalon_ps2.h"
+#include "alt_types.h"
 #include "altera_up_ps2_keyboard.h"
 #include <altera_avalon_timer.h>
 
-#include "alt_types.h"        
+   
 
 
 
@@ -65,6 +66,8 @@ SemaphoreHandle_t shared_resource_sem;
 QueueHandle_t SwitchQ;
 
 QueueHandle_t LEDQ;
+
+QueueHandle_t ReactionTimeQ;
 
 // Queue for communication between StabilityControlCheck & VGADisplayTask
 QueueHandle_t vgaFreqQ;
@@ -121,7 +124,7 @@ SemaphoreHandle_t lcdUpdate_sem;
 SemaphoreHandle_t monitorTimerControl_sem;
 SemaphoreHandle_t monitorSwitchLogic_sem;
 
-SemaphoreHandle_t SpeedCheckFlag_sem;
+SemaphoreHandle_t SpeedCheckFlag_Mutex;
 
 unsigned int SpeedCheckFlag = 1;
 
@@ -150,6 +153,8 @@ SemaphoreHandle_t MonitorMode_sem;
 
 int firstShed = 1;
 
+int tickCount = 0;
+
 
 /*---------- INTERRUPT SERVICE ROUTINES ----------*/
 // ISR for handling Frequency Relay Interrupt
@@ -163,6 +168,11 @@ void freq_relay(){
 		xQueueSendFromISR(newFreqQ, (void *)&adcCount, NULL);
 	
 	}
+
+	alt_timestamp_start();
+
+	tickCount = xTaskGetTickCount();
+
 	return;
 }
 
@@ -296,6 +306,7 @@ void LoadConnect() {
 }
 
 void LoadShed() {
+	int timeStamp;
 	firstShed = 0;
 	LEDStruct state2send;
 
@@ -318,6 +329,23 @@ void LoadShed() {
 		xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
 		SystemState = state2send;
 		xSemaphoreGive(SystemState_mutex);
+
+		if (xSemaphoreTake(SpeedCheckFlag_Mutex,portMAX_DELAY) == pdTRUE) {
+			if (SpeedCheckFlag){
+				SpeedCheckFlag = 0;
+
+				int DIff = xTaskGetTickCount() - tickCount;
+				timeStamp = (long)(alt_timestamp()) / 100000;
+
+				printf("Time taken to shed: %d \n",timeStamp);
+				printf("time diff tick for TICKS:%d", DIff);
+				xQueueSend(ReactionTimeQ, &timeStamp, 200);
+
+			}
+			xSemaphoreGive(SpeedCheckFlag_Mutex);
+
+			
+		}
 
 		xQueueSend(LEDQ,&state2send,50);
 	}
@@ -356,10 +384,16 @@ void LoadManagement(void *pvParameters) {
 							xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY);
 							//Checking Instability whilst in NOrmal operation
 							if (InStabilityFlag) {
+
+								if (xSemaphoreTake(SpeedCheckFlag_Mutex,portMAX_DELAY) == pdTRUE) {
+									SpeedCheckFlag = 1;
+									xSemaphoreGive(SpeedCheckFlag_Mutex);
+								}
 								
 								LoadShed();
 								xTimerStart(MonitoringTimer, 0);
 								monitorMode = 1;
+
 
 							} 
 
@@ -555,7 +589,7 @@ void reactionTimer(void *pvParameters){
 
 	while (1){
 
-		if (xSemaphoreTake(SpeedCheckFlag_sem,1) == pdTRUE){
+		if (xSemaphoreTake(SpeedCheckFlag_Mutex,1) == pdTRUE){
 			if (firstShed){
 				startTime = (int) xTaskGetTickCount();
 				printf("start time: %d \n", startTime);
@@ -572,7 +606,7 @@ void reactionTimer(void *pvParameters){
 	}
 
 
-}
+} 
 
 // Checks the newFreqQ for new frequencies, calculates rate of change
 // Updates the loadManageState flag if the system needs to enter shedding mode
@@ -648,7 +682,6 @@ void StabilityControlCheck(void *pvParameters)
 				if ((newFreq < lowerFreqBound_local) || (rocLocal > rocBound_local))
 				{
 					InStabilityFlag = 1;
-					xSemaphoreGive(SpeedCheckFlag_sem);
 
 				}
 			}
@@ -978,7 +1011,7 @@ int CreateTasks() {
 
 	xTaskCreate(MonitorTimer, "MT",TASK_STACKSIZE, NULL, 4, NULL);
 
-	xTaskCreate(reactionTimer,"RT", TASK_STACKSIZE, NULL,3, NULL);
+	//xTaskCreate(reactionTimer,"RT", TASK_STACKSIZE, NULL,3, NULL);
 
 	printf("All tasks made Okay! \n");
 
@@ -999,6 +1032,7 @@ int OSDataInit() {
 	newFreqQ = xQueueCreate(10, sizeof( void* ));
 	vgaFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 	keyboardQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
+	ReactionTimeQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof(int));
 
 	// Initialise Semaphores
 	lcdUpdate_sem = xSemaphoreCreateBinary();
@@ -1007,7 +1041,6 @@ int OSDataInit() {
 	MonitorTimer_sem = xSemaphoreCreateBinary();
 	LEDTickget_sem = xSemaphoreCreateBinary();
 	EndTimeSemaphore = xSemaphoreCreateBinary();
-	SpeedCheckFlag_sem = xSemaphoreCreateBinary();
 
 	// Initialise mutexes
 	roc_mutex = xSemaphoreCreateMutex();
@@ -1018,6 +1051,8 @@ int OSDataInit() {
 	whichBoundFlag_mutex = xSemaphoreCreateMutex();
 	SystemState_mutex = xSemaphoreCreateMutex();
 	MonitorMode_sem = xSemaphoreCreateMutex();
+
+	SpeedCheckFlag_Mutex = xSemaphoreCreateMutex();
 
 	return 0;
 }
