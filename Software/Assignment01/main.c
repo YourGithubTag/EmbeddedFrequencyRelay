@@ -418,6 +418,7 @@ void LoadManagement(void *pvParameters) {
 	
 	while (1) {
 		//TODO: Debug problems with Switch not updating the state fully
+		//TODO: INSTANT GIVEBACK OF MUTEXES?? LOCAL COPY OF FLAGS???
 		if (xSemaphoreTake(maintenanceModeFlag_mutex, 100) == pdTRUE) {
 			if (!maintenanceModeFlag) {
 
