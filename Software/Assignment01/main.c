@@ -346,7 +346,6 @@ void LoadConnect() {
 
 	} else {
 		unsigned int ret = 64;
-		// TODO: Start from bit 7 instead
 
 		while (!(state2send.Green & ret)) {
 			ret >>= 1;
@@ -561,7 +560,7 @@ void LoadManagement(void *pvParameters) {
 
 
 void MonitorTimer(void *pvParameters) {
-	unsigned int PrevInstabilityFlag;
+	unsigned int PrevInstabilityFlag = InStabilityFlag;
 	while(1) {
 
 		if (xSemaphoreTake(monitorTimerControl_sem, portMAX_DELAY) == pdTRUE) {
@@ -617,7 +616,7 @@ void LEDcontrol(void *pvParameters) {
 			IOWR_ALTERA_AVALON_PIO_DATA(RED_LEDS_BASE, Status.Red);
 			IOWR_ALTERA_AVALON_PIO_DATA(GREEN_LEDS_BASE, Status.Green);
 
-			xSemaphoreGive(EndTimeSemaphore);
+			//xSemaphoreGive(EndTimeSemaphore);
 
 
 		} else {
@@ -1271,13 +1270,13 @@ double array2double(unsigned int *newVal)
 // Creates all tasks used
 int CreateTasks() {
 	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, xWallSwitchPoll);
-	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 3, xStabilityControlCheck);
+	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 8, xStabilityControlCheck);
 	xTaskCreate(PRVGADraw_Task, "PRVGADraw_Task", TASK_STACKSIZE, NULL, 2, xPRVGADraw_Task);
 	//xTaskCreate(load_manage,"LDM",TASK_STACKSIZE,NULL,4,xload_manage);
 	//xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,5,xLEDcontrol);
 	xTaskCreate(KeyboardReader, "KeyboardReader", TASK_STACKSIZE, NULL, 6, xKeyboardReader);
-	xTaskCreate(LCDUpdater, "LCDUpdater", TASK_STACKSIZE, NULL, 7, xLCDUpdater);
-	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,2,NULL);
+	xTaskCreate(LCDUpdater, "LCDUpdater", TASK_STACKSIZE, NULL, 2, xLCDUpdater);
+	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,3,NULL);
 	xTaskCreate(MonitorLogic, "ML",TASK_STACKSIZE, NULL, 5, NULL);
 	xTaskCreate(MonitorTimer, "MT",TASK_STACKSIZE, NULL, 4, NULL);
 	printf("All tasks made Okay! \n");
