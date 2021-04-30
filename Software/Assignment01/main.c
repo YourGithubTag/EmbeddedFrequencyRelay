@@ -78,16 +78,12 @@ TaskHandle_t xLEDcontrol;
 TaskHandle_t xKeyboardReader;
 TaskHandle_t xLCDUpdater;
 
-// Definition of Semaphore
-SemaphoreHandle_t shared_resource_sem;
-
 
 // globals variables
 QueueHandle_t SwitchQ;
 
 QueueHandle_t LEDQ;
 
-QueueHandle_t ReactionTimeQ;
 
 // Queue for communication between StabilityControlCheck & VGADisplayTask
 QueueHandle_t vgaFreqQ;
@@ -106,6 +102,8 @@ SemaphoreHandle_t maintenanceModeFlag_mutex;
 // System flag for if we are in maintenance mode
 unsigned int maintenanceModeFlag = 0;
 
+
+//Struct used for LED and System State
 typedef struct LEDstatus {
 	unsigned int Red;
 	unsigned int Green;
@@ -158,41 +156,38 @@ typedef struct{
 //Semaphore for monitoring mode
 
 SemaphoreHandle_t monitorTimerControl_sem;
-SemaphoreHandle_t monitorSwitchLogic_sem;
-
-SemaphoreHandle_t SpeedCheckFlag_Mutex;
-
-unsigned int SpeedCheckFlag = 1;
 
 SemaphoreHandle_t LEDTickget_sem;
 
-SemaphoreHandle_t EndTimeSemaphore;
-
 QueueHandle_t timeVgaQ;
 
-
-/*---------- FUNCTION DECLARATIONS ----------*/
-double array2double(unsigned int *newVal);
+//Timer for Monitoring the system
 
 TimerHandle_t MonitoringTimer;
 
+//semaphore to run the monitor logic task
+
 SemaphoreHandle_t MonitorTimer_sem;
+
+//System state mutex
 
 SemaphoreHandle_t SystemState_mutex;
 
 LEDStruct SystemState;
 
+//Monitor mode flag
+
 unsigned int monitorMode = 0;
 
 SemaphoreHandle_t MonitorMode_Mutex;
 
-SemaphoreHandle_t SOmetjing;
-
-//int tickCount = 0;
-
-int timerLock = 0;
+//Queue to send ticks from stability checking to Load management
 
 QueueHandle_t tickStab2LoadQ;
+
+//--------------Function Declaration-----------------//
+
+double array2double(unsigned int *newVal);
 
 /*---------- INTERRUPT SERVICE ROUTINES ----------*/
 // ISR for handling Frequency Relay Interrupt
@@ -216,21 +211,12 @@ void freq_relay(){
 	// Send System uptime tick count to load_manage
 	if (xQueueIsQueueFullFromISR(tick2StabilityQ) == pdFALSE)
 	{
-		//tickCount = xTaskGetTickCountFromISR();
 		tickCount = alt_timestamp();
 		xQueueSendFromISR(tick2StabilityQ, (void*)&tickCount, NULL);
 	}
 
-	// if (!SpeedCheckFlag) {
-	// 	alt_timestamp_start();
-	// 	tickCount = xTaskGetTickCount();
-	// }
 	return;
 }
-//
-//void vMonitoringTimerCallback(xTimerHandle_t timer) {
-//	xSemaphoreGive(MonitorTimer_sem,NULL);
-//}
 
 void Button_ISR (void* context, alt_u32 id) {
 
@@ -319,9 +305,8 @@ void ps2_isr (void* context, alt_u32 id){
 
 /*---------- TASK DEFINITIONS ----------*/
 
+// Helper function to sample the switches only once
 void oneshotSample(void) {
-	
-
 	int CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE);
 	CurrSwitchValue = CurrSwitchValue & 0x7F;
 //	printf("ONESHOT\n");
@@ -370,7 +355,6 @@ void LoadConnect() {
 }
 
 void LoadShed() {
-	int timeStamp;
 	LEDStruct state2send;
 
 	xSemaphoreTake(SystemState_mutex, portMAX_DELAY);
@@ -393,21 +377,6 @@ void LoadShed() {
 		SystemState = state2send;
 		xSemaphoreGive(SystemState_mutex);
 
-		// if (xSemaphoreTake(SpeedCheckFlag_Mutex,portMAX_DELAY) == pdTRUE) {
-		// 	if (SpeedCheckFlag){
-		// 		SpeedCheckFlag = 0;
-		// 		timerLock = 0;
-
-		// 		int DIff = xTaskGetTickCount() - tickCount;
-		// 		timeStamp = (long)(alt_timestamp()) / 100000;
-
-		// 		printf("Time taken to shed: %d \n",timeStamp);
-		// 		printf("time diff tick for TICKS:%d", DIff);
-		// 		xQueueSend(ReactionTimeQ, &timeStamp, 200);
-
-		// 	}
-		// xSemaphoreGive(SpeedCheckFlag_Mutex);
-		// }
 
 		xQueueSend(LEDQ,&state2send,50);
 	}
@@ -423,15 +392,12 @@ void LoadManagement(void *pvParameters) {
 	unsigned int EndTick;
 	
 	while (1) {
-		//TODO: Debug problems with Switch not updating the state fully
-		//TODO: INSTANT GIVEBACK OF MUTEXES?? LOCAL COPY OF FLAGS???
 		if (xSemaphoreTake(maintenanceModeFlag_mutex, 100) == pdTRUE) {
 			if (!maintenanceModeFlag) {
 
 				xSemaphoreGive(maintenanceModeFlag_mutex);
 
 				if (xSemaphoreTake(MonitorMode_Mutex, 65) == pdTRUE) {
-					//printf("Moniter mode : %d \n",monitorMode);
 
 					if (!monitorMode) {
 						//Normal Mode
@@ -440,42 +406,38 @@ void LoadManagement(void *pvParameters) {
 								oneshot = 0;
 								oneshotSample();
 
-								//BACK TO NORMAL OPERATION
-								//xSemaphoreGive(SpeedCheckFlag_sem);
 							}
 
-							//printf("\n NORMAL \n");
-
-							xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY);
-							//Checking Instability whilst in NOrmal operation
-							if (InStabilityFlag) {
-								
-								LoadShed();
-
-								if (xQueueReceive(tickStab2LoadQ, &tempTickCount, portMAX_DELAY) == pdTRUE)
-								{
-//									printf("Old tickcount of %d received \n", tempTickCount);
-//									usleep(100);
-									//EndTick = xTaskGetTickCount();
-									EndTick = alt_timestamp();
-//									printf("NEW tickcount of %d recived \n", EndTick );
-
-									timeTaken = (EndTick - tempTickCount) / 10000;
-
-									// Send timeTake to PRVGADraw
-									xQueueSend(timeVgaQ, &timeTaken, 0);
-
-									//alt_timestamp_start();
-								}
-								
-								xTimerStart(MonitoringTimer, 0);
-								monitorMode = 1;
-
-
-							} 
-
-							xSemaphoreGive(InStabilityFlag_mutex);
 							xSemaphoreGive(MonitorMode_Mutex);
+
+							if (xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY) == pdTRUE){
+								//Checking Instability whilst in NOrmal operation
+								if (InStabilityFlag) {
+									xSemaphoreGive(InStabilityFlag_mutex);
+									
+									LoadShed();
+
+									if (xQueueReceive(tickStab2LoadQ, &tempTickCount, portMAX_DELAY) == pdTRUE)
+									{
+										//printf("Old tickcount of %d received \n", tempTickCount);
+
+										EndTick = alt_timestamp();
+										//printf("NEW tickcount of %d recived \n", EndTick );
+
+										timeTaken = (EndTick - tempTickCount) / 100000; //freq is 100000000
+
+										// Send timeTake to PRVGADraw
+										xQueueSend(timeVgaQ, &timeTaken, 0);
+
+										//alt_timestamp_start();
+									}
+									
+									xTimerStart(MonitoringTimer, 0);
+									monitorMode = 1;
+								} else {
+									xSemaphoreGive(InStabilityFlag_mutex);
+								}
+							}
 
 							if (xQueueReceive(SwitchQ, &temp, 40) == pdTRUE) {
 
@@ -486,26 +448,22 @@ void LoadManagement(void *pvParameters) {
 								xSemaphoreGive(SystemState_mutex);
 
 								if (xQueueSend(LEDQ,&state2send,40) == pdTRUE) {
-//									printf("Sent!!! \n");
+									;//printf("Sent!!! \n");
 								}
 							}	
 							
 					} else {
-						//MONITOR!!!!!
+						//MONITOR Mode
 
 						xSemaphoreGive(MonitorMode_Mutex);
 						xSemaphoreGive(monitorTimerControl_sem);
-						//printf("GAVE SOME MONITOR SEMS");
 
 						if (!oneshot) {
 							oneshot = 1;
 						}
 
 						if (xQueueReceive(SwitchQ,&temp, 50) == pdTRUE) {
-
-
 							if (xSemaphoreTake(SystemState_mutex,50) == pdTRUE ) {
-							//If maybe redundant here
 
 									SystemState.Red = SystemState.Red & temp;
 									SystemState.Green = SystemState.Green & temp;
@@ -528,7 +486,7 @@ void LoadManagement(void *pvParameters) {
 				if (oneshot) {
 						xTimerStop(MonitoringTimer,500);
 						
-//						printf("OneShot from Maintenance! \n");
+						//printf("OneShot from Maintenance! \n");
 						xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
 						oneshot = 0;
 						oneshotSample();
@@ -555,7 +513,7 @@ void LoadManagement(void *pvParameters) {
 					xSemaphoreGive(SystemState_mutex);
 
 					if (xQueueSend(LEDQ,&state2send,40) == pdTRUE) {
-//						printf("Sent from Maintenance! \n");
+						;//printf("Sent from Maintenance! \n");
 					}
 				}
 		}
@@ -575,7 +533,7 @@ void MonitorTimer(void *pvParameters) {
 
 		if (xSemaphoreTake(monitorTimerControl_sem, portMAX_DELAY) == pdTRUE) {
 
-			if ( xSemaphoreTake(InStabilityFlag_mutex, 10) == pdTRUE) {
+			if ( xSemaphoreTake(InStabilityFlag_mutex, 100) == pdTRUE) {
 				if (PrevInstabilityFlag != InStabilityFlag ) {
 
 					PrevInstabilityFlag = InStabilityFlag;
@@ -618,16 +576,11 @@ void MonitorLogic(void *pvParameters) {
 
 void LEDcontrol(void *pvParameters) {
 	LEDStruct Status;
-
-	int check = 0;
 	while (1) {
 		if (xQueueReceive(LEDQ, &Status, portMAX_DELAY ) == pdTRUE ) {
 
 			IOWR_ALTERA_AVALON_PIO_DATA(RED_LEDS_BASE, Status.Red);
 			IOWR_ALTERA_AVALON_PIO_DATA(GREEN_LEDS_BASE, Status.Green);
-
-			//xSemaphoreGive(EndTimeSemaphore);
-
 
 		} else {
 			;
@@ -636,7 +589,7 @@ void LEDcontrol(void *pvParameters) {
 	}
 }
 
-
+//Task to poll switchess
 void WallSwitchPoll(void *pvParameters) {
 
 	unsigned int CurrSwitchValue = 0;
@@ -644,7 +597,6 @@ void WallSwitchPoll(void *pvParameters) {
 	oneshotSample();
 
   while (1){
-	  	//REMOVED MAINTANCE MODE CHECK --MUTEX DEPENDANACE
 				CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE);
 				CurrSwitchValue = CurrSwitchValue & 0x7F;
 
@@ -753,8 +705,8 @@ void StabilityControlCheck(void *pvParameters)
 						// Send to load_manage
 						if (xQueueSend(tickStab2LoadQ, &tickCount, 0) == pdFALSE)
 						{
-//							printf("Failed to send ticks from STABILITY to LOAD\n");
-//							usleep(100);
+						//printf("Failed to send ticks from STABILITY to LOAD\n");
+						//usleep(100);
 						}
 						else
 						{
@@ -1412,17 +1364,14 @@ int OSDataInit() {
 	Q_freq_data = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 	tick2StabilityQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 	tickStab2LoadQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
-	ReactionTimeQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof(int));
 	timeVgaQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 
 	// Initialise Semaphores
 	lcdUpdate_sem = xSemaphoreCreateBinary();
 	updatedBound_sem = xSemaphoreCreateBinary();
 	monitorTimerControl_sem = xSemaphoreCreateBinary();
-	monitorSwitchLogic_sem = xSemaphoreCreateBinary();
 	MonitorTimer_sem = xSemaphoreCreateBinary();
 	LEDTickget_sem = xSemaphoreCreateBinary();
-	EndTimeSemaphore = xSemaphoreCreateBinary();
 
 	// Initialise mutexes
 	roc_mutex = xSemaphoreCreateMutex();
@@ -1434,7 +1383,6 @@ int OSDataInit() {
 	SystemState_mutex = xSemaphoreCreateMutex();
 	MonitorMode_Mutex = xSemaphoreCreateMutex();
 
-	SpeedCheckFlag_Mutex = xSemaphoreCreateMutex();
 
 	return 0;
 }
@@ -1479,6 +1427,10 @@ int main(int argc, char* argv[], char* envp[])
   	alt_irq_register(PUSH_BUTTON_IRQ, 0, Button_ISR);
 
 	alt_timestamp_start();
+
+	int timefreq = alt_timestamp_freq();
+
+	printf("FREQ OF Timestamp Timer: %d", timefreq);
 	
 	// Start Scheduler
 	vTaskStartScheduler();
