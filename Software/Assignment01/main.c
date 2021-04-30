@@ -122,11 +122,11 @@ SemaphoreHandle_t roc_mutex;
 QueueHandle_t keyboardQ;
 
 // Lower frequency bound
-double lowerFreqBound = 49; // TODO: Choose a default lowerFreqBound
+double lowerFreqBound = 49;
 // Mutex for protecting lower frequency bound
 SemaphoreHandle_t lowerFreqBound_mutex;
 // Absolute rate of change bound
-double rocBound = 20; // TODO: Choose a default rocBound
+double rocBound = 20;
 // Mutex for protecting rate of change bound
 SemaphoreHandle_t rocBound_mutex;
 /// whichBoundFlag represents which parameter is currently being edited, 0 = lowerFreqBound, 1 = rocBound)
@@ -155,7 +155,6 @@ typedef struct{
 }Line;
 
 
-
 //Semaphore for monitoring mode
 
 SemaphoreHandle_t monitorTimerControl_sem;
@@ -168,6 +167,8 @@ unsigned int SpeedCheckFlag = 1;
 SemaphoreHandle_t LEDTickget_sem;
 
 SemaphoreHandle_t EndTimeSemaphore;
+
+QueueHandle_t timeVgaQ;
 
 
 /*---------- FUNCTION DECLARATIONS ----------*/
@@ -187,7 +188,7 @@ SemaphoreHandle_t MonitorMode_Mutex;
 
 SemaphoreHandle_t SOmetjing;
 
-int tickCount = 0;
+//int tickCount = 0;
 
 int timerLock = 0;
 
@@ -237,9 +238,16 @@ void Button_ISR (void* context, alt_u32 id) {
  	IOWR_ALTERA_AVALON_PIO_EDGE_CAP(PUSH_BUTTON_BASE, 0x7);
 
 	xSemaphoreTakeFromISR(maintenanceModeFlag_mutex, NULL);
-	maintenanceModeFlag =  ~maintenanceModeFlag;
+	if (maintenanceModeFlag == 0)
+	{
+		maintenanceModeFlag = 1;
+	}
+	else
+	{
+		maintenanceModeFlag = 0;
+	}
 	xSemaphoreGiveFromISR(maintenanceModeFlag_mutex, NULL);
-	printf("button \n");
+//	printf("button \n");
 }
 
 void vMonitoringTimerCallback(TimerHandle_t timer) {
@@ -267,8 +275,6 @@ void ps2_isr (void* context, alt_u32 id){
 		maintModeFlag_local = maintenanceModeFlag;
 		xSemaphoreGiveFromISR(maintenanceModeFlag_mutex, NULL);
 	}
-
-	maintModeFlag_local = 1;// TODO: REMOVE THIS LINE
 
 	// If key is pressed & maintenance mode
 	if ((status == 0 ) && (maintModeFlag_local))
@@ -318,7 +324,7 @@ void oneshotSample(void) {
 
 	int CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE);
 	CurrSwitchValue = CurrSwitchValue & 0x7F;
-	printf("ONESHOT\n");
+//	printf("ONESHOT\n");
 
 	if (xQueueSend(SwitchQ, &CurrSwitchValue, portMAX_DELAY) != pdTRUE) {
 		printf("failed INIT switch send \n");
@@ -412,7 +418,7 @@ void LoadManagement(void *pvParameters) {
 	unsigned int temp;
 	LEDStruct state2send;
 	int oneshot = 1;
-	float timeTaken;
+	unsigned int timeTaken;
 	unsigned int tempTickCount = 0;
 	unsigned int EndTick;
 	
@@ -448,15 +454,18 @@ void LoadManagement(void *pvParameters) {
 
 								if (xQueueReceive(tickStab2LoadQ, &tempTickCount, portMAX_DELAY) == pdTRUE)
 								{
-									printf("Old tickcount of %d received \n", tempTickCount);
-									usleep(100);
+//									printf("Old tickcount of %d received \n", tempTickCount);
+//									usleep(100);
 									//EndTick = xTaskGetTickCount();
 									EndTick = alt_timestamp();
-									printf("NEW tickcount of %d recived \n", EndTick );
+//									printf("NEW tickcount of %d recived \n", EndTick );
 
-									timeTaken = (float) (EndTick - tempTickCount) / 10000;
-									printf("Time Taken: %7.2f",timeTaken);
-									alt_timestamp_start();
+									timeTaken = (EndTick - tempTickCount) / 10000;
+
+									// Send timeTake to PRVGADraw
+									xQueueSend(timeVgaQ, &timeTaken, 0);
+
+									//alt_timestamp_start();
 								}
 								
 								xTimerStart(MonitoringTimer, 0);
@@ -477,7 +486,7 @@ void LoadManagement(void *pvParameters) {
 								xSemaphoreGive(SystemState_mutex);
 
 								if (xQueueSend(LEDQ,&state2send,40) == pdTRUE) {
-									printf("Sent!!! \n");
+//									printf("Sent!!! \n");
 								}
 							}	
 							
@@ -519,7 +528,7 @@ void LoadManagement(void *pvParameters) {
 				if (oneshot) {
 						xTimerStop(MonitoringTimer,500);
 						
-						printf("OneShot from Maintenance! \n");
+//						printf("OneShot from Maintenance! \n");
 						xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
 						oneshot = 0;
 						oneshotSample();
@@ -546,7 +555,7 @@ void LoadManagement(void *pvParameters) {
 					xSemaphoreGive(SystemState_mutex);
 
 					if (xQueueSend(LEDQ,&state2send,40) == pdTRUE) {
-						printf("Sent from Maintenance! \n");
+//						printf("Sent from Maintenance! \n");
 					}
 				}
 		}
@@ -657,8 +666,6 @@ void WallSwitchPoll(void *pvParameters) {
 // Sends frequency information to the VGA Display Task
 void StabilityControlCheck(void *pvParameters)
 {
-	printf("Stability Control Check");
-	usleep(25);
 	// Stores old frequency and ADC count for rate of change calculation
 	double oldFreq = 0;
 	unsigned int oldCount = 0;
@@ -687,9 +694,6 @@ void StabilityControlCheck(void *pvParameters)
 
 	// Local copy of monitorMode flag
 	unsigned int monitorMode_local = 0;
-
-	int startTime = 0;
-	int endTime = 0;
 
 
 	while(1)
@@ -749,13 +753,13 @@ void StabilityControlCheck(void *pvParameters)
 						// Send to load_manage
 						if (xQueueSend(tickStab2LoadQ, &tickCount, 0) == pdFALSE)
 						{
-							printf("Failed to send ticks from STABILITY to LOAD\n");
-							usleep(100);
+//							printf("Failed to send ticks from STABILITY to LOAD\n");
+//							usleep(100);
 						}
 						else
 						{
-							printf("Successfully sent ticks from STABILITY to LOAD\n");
-							usleep(100);
+//							printf("Successfully sent ticks from STABILITY to LOAD\n");
+//							usleep(100);
 						}
 					} else {
 						alt_timestamp_start();
@@ -830,21 +834,6 @@ void PRVGADraw_Task(void *pvParameters ){
 	int i = 99, j = 0;
 	Line line_freq, line_roc;
 
-	// Print base miscellaneous text
-	char str[100];
-	sprintf(str, "Low Freq Threshold: %7.2f Hz", 1234.0);
-	alt_up_char_buffer_string(char_buf, str, 5, 45);
-	sprintf(str, "RoC Threshold: %7.2f Hz/sec", 1234.0);
-	alt_up_char_buffer_string(char_buf, str, 5, 49);
-	alt_up_char_buffer_string(char_buf, "System Status: DEFAULT", 5, 41);
-	alt_up_char_buffer_string(char_buf, "System Uptime: x", 40, 41);
-	alt_up_char_buffer_string(char_buf, "Avg Response Time: x", 40, 43);
-	alt_up_char_buffer_string(char_buf, "Min Response Time: x", 40, 45);
-	alt_up_char_buffer_string(char_buf, "Max Response Time: x", 40, 47);
-	alt_up_char_buffer_string(char_buf, "Last 5 Response Times:", 40, 49);
-	alt_up_char_buffer_string(char_buf, "[t0, t1, t2, t3, t4]", 40, 51);
-
-
 	// Integer represents what system status currently is
 	unsigned int systemStatus = 0;
 	unsigned int prev_systemStatus = 0;
@@ -860,6 +849,41 @@ void PRVGADraw_Task(void *pvParameters ){
 
 	// Local copy of lowerFreqBound
 	double lowerFreqBound_local = 0;
+
+	// Information on system response times
+	unsigned int latestTime;
+	unsigned int minTime = 0;
+	unsigned int maxTime = 0;
+	unsigned int avgTime = 0;
+	unsigned int lastFive[5] = {0};
+	float uptime = 0;
+	unsigned int avgCount = 0;
+
+	// Print base miscellaneous text
+	char str[100];
+
+	// Get mutexes for global variable thresholds
+	xSemaphoreTake(rocBound_mutex, portMAX_DELAY);
+	rocBound_local = rocBound;
+	xSemaphoreGive(rocBound_mutex);
+
+	sprintf(str, "RoC Threshold: %7.2f Hz/sec", rocBound_local);
+	alt_up_char_buffer_string(char_buf, str, 5, 49);
+
+	xSemaphoreTake(lowerFreqBound_mutex, portMAX_DELAY);
+	lowerFreqBound_local = lowerFreqBound;
+	xSemaphoreGive(lowerFreqBound_mutex);
+
+	sprintf(str, "Low Freq Threshold: %7.2f Hz", lowerFreqBound_local);
+	alt_up_char_buffer_string(char_buf, str, 5, 45);
+
+	alt_up_char_buffer_string(char_buf, "System Status: DEFAULT", 5, 41);
+	alt_up_char_buffer_string(char_buf, "System Uptime: x", 40, 41);
+	alt_up_char_buffer_string(char_buf, "Avg Response Time: x", 40, 43);
+	alt_up_char_buffer_string(char_buf, "Min Response Time: x", 40, 45);
+	alt_up_char_buffer_string(char_buf, "Max Response Time: x", 40, 47);
+	alt_up_char_buffer_string(char_buf, "Last 5 Response Times:", 40, 49);
+	alt_up_char_buffer_string(char_buf, "[t0, t1, t2, t3, t4]", 40, 51);
 
 	while(1){
 
@@ -1001,11 +1025,62 @@ void PRVGADraw_Task(void *pvParameters ){
 		}
 
 		// Display information on system response times
-		// Display 5 most recent measurements
-		// Display min and maximum time taken
-		// Display average time taken
-		// Display total time system has been active
+		if (xQueueReceive(timeVgaQ, &latestTime, 5) == pdTRUE)
+		{
+			// Store latest time
+			for (int i = 4; i > 0; i--)
+			{
+				lastFive[i] = lastFive[i - 1];
+			}
+			lastFive[0] = latestTime;
 
+			minTime = latestTime;
+		}
+
+		// Determine min max, and avg time out of last 5
+		avgTime = 0;
+		avgCount = 0;
+		for (int i = 0; i < 5; i++)
+		{
+			if ((lastFive[i] < minTime) && (lastFive[i] != 0))
+			{
+				minTime = lastFive[i];
+			}
+
+			if (lastFive[i] > maxTime)
+			{
+				maxTime = lastFive[i];
+			}
+
+			if (lastFive[i] != 0)
+			{
+				avgCount++;
+				avgTime += lastFive[i];
+			}
+
+		}
+		avgTime /= avgCount;
+
+		// Get total system uptime in seconds
+		uptime = (float)xTaskGetTickCount() / 1000;
+
+		// Update values on the monitor
+
+		sprintf(str, "System Uptime: %6.2f s", uptime);
+		alt_up_char_buffer_string(char_buf, str, 40, 41);
+
+		sprintf(str, "Avg Response Time: %3d ms", avgTime);
+		alt_up_char_buffer_string(char_buf, str, 40, 43);
+
+		sprintf(str, "Min Response Time: %3d ms", minTime);
+		alt_up_char_buffer_string(char_buf, str, 40, 45);
+
+		sprintf(str, "Max Response Time: %3d ms", maxTime);
+		alt_up_char_buffer_string(char_buf, str, 40, 47);
+
+		alt_up_char_buffer_string(char_buf, "Last 5 Response Times (ms):", 40, 49);
+		sprintf(str, "[%3d, %3d, %3d, %3d, %3d]", lastFive[0], lastFive[1], lastFive[2], lastFive[3], lastFive[4]);
+		alt_up_char_buffer_string(char_buf, str, 40, 51);
 	}
 }
 
@@ -1095,8 +1170,8 @@ void KeyboardReader(void *pvParamaters)
 				// Generate a double from the array
 				updateVal = array2double(newVal);
 
-				printf("Double generated: %f\n", updateVal);
-				usleep(10);
+//				printf("Double generated: %f\n", updateVal);
+//				usleep(10);
 
 				xSemaphoreTake(whichBoundFlag_mutex, portMAX_DELAY);
 
@@ -1159,66 +1234,97 @@ void LCDUpdater(void *pvParameters)
 	// Pointer to the LCD
 	FILE *lcd;
 
+	// Initialise local copies of both bounds
+	xSemaphoreTake(lowerFreqBound_mutex, portMAX_DELAY);
+	lowerFreqBound_local = lowerFreqBound;
+	xSemaphoreGive(lowerFreqBound_mutex);
+
+	xSemaphoreTake(rocBound_mutex, portMAX_DELAY);
+	rocBound_local = rocBound;
+	xSemaphoreGive(rocBound_mutex);
+
 	while (1)
 	{
-		// Wait for semaphore indicating that a new value is ready
-		xSemaphoreTake(lcdUpdate_sem, portMAX_DELAY);
-
-		// Store local copy of whichBoundFlag
-		xSemaphoreTake(whichBoundFlag_mutex, portMAX_DELAY);
-		whichBoundFlag_local = whichBoundFlag;
-		xSemaphoreGive(whichBoundFlag_mutex);
-
-		// Store local copies of both bounds
-		xSemaphoreTake(lowerFreqBound_mutex, portMAX_DELAY);
-		lowerFreqBound_local = lowerFreqBound;
-		xSemaphoreGive(lowerFreqBound_mutex);
-
-		xSemaphoreTake(rocBound_mutex, portMAX_DELAY);
-		rocBound_local = rocBound;
-		xSemaphoreGive(rocBound_mutex);
-
 		// Store local copy of maintenanceModeFlag
 		xSemaphoreTake(maintenanceModeFlag_mutex, portMAX_DELAY);
 		maintenanceModeFlag_local = maintenanceModeFlag;
 		xSemaphoreGive(maintenanceModeFlag_mutex);
 
-		// Open the character LCD
-		lcd = fopen(CHARACTER_LCD_NAME, "w");
-
-		// If LCD opens successfully
-		if(lcd != NULL)
+		// Wait for semaphore indicating that a new value is ready
+		if (xSemaphoreTake(lcdUpdate_sem, 5000) == pdTRUE)
 		{
-			// Clear the screen
-			#define ESC 27
-			#define CLEAR_LCD_STRING "[2J"
-			fprintf(lcd, "%c%s", ESC, CLEAR_LCD_STRING);
+			// Store local copy of whichBoundFlag
+			xSemaphoreTake(whichBoundFlag_mutex, portMAX_DELAY);
+			whichBoundFlag_local = whichBoundFlag;
+			xSemaphoreGive(whichBoundFlag_mutex);
 
-			// If maintenance mode, only write one
-			if (maintenanceModeFlag_local == 1)
+			// Update the local copies of both bounds
+			xSemaphoreTake(lowerFreqBound_mutex, portMAX_DELAY);
+			lowerFreqBound_local = lowerFreqBound;
+			xSemaphoreGive(lowerFreqBound_mutex);
+
+			xSemaphoreTake(rocBound_mutex, portMAX_DELAY);
+			rocBound_local = rocBound;
+			xSemaphoreGive(rocBound_mutex);
+
+			// Open the character LCD
+			lcd = fopen(CHARACTER_LCD_NAME, "w");
+
+			// If LCD opens successfully
+			if(lcd != NULL)
 			{
-				// Editing RoC
-				if (whichBoundFlag_local == 1)
+				// Clear the screen
+				#define ESC 27
+				#define CLEAR_LCD_STRING "[2J"
+				fprintf(lcd, "%c%s", ESC, CLEAR_LCD_STRING);
+
+				// If maintenance mode, only write one
+				if (maintenanceModeFlag_local == 1)
 				{
-					fprintf(lcd, "LowFreq: %.2f\n", lowerFreqBound_local);
-					fprintf(lcd, "Enter RoC...\n");
+					// Editing RoC
+					if (whichBoundFlag_local == 1)
+					{
+						fprintf(lcd, "LowFreq: %.2f\n", lowerFreqBound_local);
+						fprintf(lcd, "Enter RoC...\n");
+					}
+					// Editing lowerFreqBound
+					else
+					{
+						fprintf(lcd, "RoC: %.2f\n", rocBound_local);
+						fprintf(lcd, "Enter LowFreq...\n");
+					}
 				}
-				// Editing lowerFreqBound
+				// If normal mode write both to screen
 				else
 				{
-					fprintf(lcd, "RoC: %.2f\n", rocBound_local);
-					fprintf(lcd, "Enter LowFreq...\n");
+					fprintf(lcd, "LowFreq: %.2f\n", lowerFreqBound_local);
+					fprintf(lcd, "RoC: %.2f", rocBound_local);
 				}
 			}
-			// If normal mode write both to screen
-			else
+
+			fclose(lcd);
+		}
+		// If no update for 5 seconds then just display old values
+		else
+		{
+			// Open the character LCD
+			lcd = fopen(CHARACTER_LCD_NAME, "w");
+
+			// If LCD opens successfully
+			if(lcd != NULL)
 			{
+				// Clear the screen
+				#define ESC 27
+				#define CLEAR_LCD_STRING "[2J"
+				fprintf(lcd, "%c%s", ESC, CLEAR_LCD_STRING);
+
 				fprintf(lcd, "LowFreq: %.2f\n", lowerFreqBound_local);
 				fprintf(lcd, "RoC: %.2f", rocBound_local);
 			}
+
+			fclose(lcd);
 		}
 
-		fclose(lcd);
 	}
 }
 
@@ -1270,18 +1376,22 @@ double array2double(unsigned int *newVal)
 
 // Creates all tasks used
 int CreateTasks() {
-	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, xWallSwitchPoll);
-	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 8, xStabilityControlCheck);
-	xTaskCreate(PRVGADraw_Task, "PRVGADraw_Task", TASK_STACKSIZE, NULL, 2, xPRVGADraw_Task);
+
+	xTaskCreate(PRVGADraw_Task, "PRVGADraw_Task", TASK_STACKSIZE, NULL, 1, xPRVGADraw_Task);
+	xTaskCreate(LCDUpdater, "LCDUpdater", TASK_STACKSIZE, NULL, 2, xLCDUpdater);
+	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 3, xWallSwitchPoll);
+	xTaskCreate(KeyboardReader, "KeyboardReader", TASK_STACKSIZE, NULL, 4, xKeyboardReader);
+	xTaskCreate(MonitorLogic, "ML",TASK_STACKSIZE, NULL, 5, NULL);
+	xTaskCreate(MonitorTimer, "MT",TASK_STACKSIZE, NULL, 6, NULL);
+	xTaskCreate(LEDcontrol, "LCC", TASK_STACKSIZE, NULL, 7, NULL);
+	xTaskCreate(LoadManagement, "LDM", TASK_STACKSIZE, NULL, 8, NULL);
+	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 9, xStabilityControlCheck);
+
 	//xTaskCreate(load_manage,"LDM",TASK_STACKSIZE,NULL,4,xload_manage);
 	//xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,5,xLEDcontrol);
-	xTaskCreate(KeyboardReader, "KeyboardReader", TASK_STACKSIZE, NULL, 6, xKeyboardReader);
-	xTaskCreate(LCDUpdater, "LCDUpdater", TASK_STACKSIZE, NULL, 2, xLCDUpdater);
-	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,3,NULL);
-	xTaskCreate(MonitorLogic, "ML",TASK_STACKSIZE, NULL, 5, NULL);
-	xTaskCreate(MonitorTimer, "MT",TASK_STACKSIZE, NULL, 4, NULL);
-	printf("All tasks made Okay! \n");
-	xTaskCreate(LoadManagement,"LDM",TASK_STACKSIZE,NULL,6,NULL);
+
+//	printf("All tasks made Okay! \n");
+//	usleep(10);
 	return 0;
 }
 
@@ -1303,6 +1413,7 @@ int OSDataInit() {
 	tick2StabilityQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 	tickStab2LoadQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 	ReactionTimeQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof(int));
+	timeVgaQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 
 	// Initialise Semaphores
 	lcdUpdate_sem = xSemaphoreCreateBinary();
@@ -1330,9 +1441,7 @@ int OSDataInit() {
 
 int main(int argc, char* argv[], char* envp[])
 {
-	printf("\n\n\n");
 	printf("Hello from Nios II!\n");
-	printf("Hello from Freq Relay Program!\n");
 
 	// Initialise data structures
 	OSDataInit();
@@ -1342,13 +1451,12 @@ int main(int argc, char* argv[], char* envp[])
 
 	CreateTimers();
 	
-	printf("PS2 CHECK\n");
 	// Initialise PS2 device
 	alt_up_ps2_dev * ps2_device = alt_up_ps2_open_dev(PS2_NAME);
 
 	// Check if PS2 device connected
 	if(ps2_device == NULL){
-		printf("can't find PS/2 device\n");
+		printf("Can't find PS/2 device.\n");
 	}
 
 	// Register PS2 ISR
@@ -1371,14 +1479,11 @@ int main(int argc, char* argv[], char* envp[])
   	alt_irq_register(PUSH_BUTTON_IRQ, 0, Button_ISR);
 
 	alt_timestamp_start();
-
-	printf("schduler start init\n");
-	usleep(25);
 	
 	// Start Scheduler
 	vTaskStartScheduler();
-	printf("schduler heap insufficient?!\n");
 	// Program will only reach here if insufficient heap to start scheduler
+	printf("Insufficient heap to start scheduler.\n");
 	for(;;) {
 		;
 	}
