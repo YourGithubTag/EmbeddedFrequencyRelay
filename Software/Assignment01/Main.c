@@ -61,6 +61,7 @@ SemaphoreHandle_t shared_resource_sem;
 // globals variables
 QueueHandle_t SwitchQ;
 
+QueueHandle_t LEDQ;
 
 // Queue for communication between StabilityControlCheck & VGADisplayTask
 QueueHandle_t vgaFreqQ;
@@ -71,15 +72,13 @@ QueueHandle_t newFreqQ;
 // Mutex for protecting InStabilityFlag
 SemaphoreHandle_t InStabilityFlag_mutex;
 
-SemaphoreHandle_t TimerSync_sem;
-
 // Flag that represents if system is in shedding mode
 unsigned int InStabilityFlag = 0;
 
 // Mutex for protecting maintenance mode flag
 SemaphoreHandle_t maintenanceModeFlag_mutex;
 // System flag for if we are in maintenance mode
-unsigned int maintenanceModeFlag;
+unsigned int maintenanceModeFlag = 0;
 
 typedef struct LEDstatus {
 	unsigned int Red;
@@ -97,11 +96,11 @@ SemaphoreHandle_t roc_mutex;
 QueueHandle_t keyboardQ;
 
 // Lower frequency bound
-double lowerFreqBound = 0; // TODO: Choose a default lowerFreqBound
+double lowerFreqBound = 49; // TODO: Choose a default lowerFreqBound
 // Mutex for protecting lower frequency bound
 SemaphoreHandle_t lowerFreqBound_mutex;
 // Absolute rate of change bound
-double rocBound = 0; // TODO: Choose a default rocBound
+double rocBound = 9; // TODO: Choose a default rocBound
 // Mutex for protecting rate of change bound
 SemaphoreHandle_t rocBound_mutex;
 /// whichBoundFlag represents which parameter is currently being edited, 0 = lowerFreqBound, 1 = rocBound)
@@ -112,6 +111,7 @@ SemaphoreHandle_t whichBoundFlag_mutex;
 // Syncronisation semaphore between KeyboardChecker and LCDUpdater
 SemaphoreHandle_t lcdUpdate_sem;
 
+
 //Semaphore for monitoring mode
 
 SemaphoreHandle_t monitorTimerControl_sem;
@@ -121,7 +121,6 @@ SemaphoreHandle_t monitorSwitchLogic_sem;
 /*---------- FUNCTION DECLARATIONS ----------*/
 double array2double(unsigned int *newVal);
 
-
 TimerHandle_t MonitoringTimer;
 
 SemaphoreHandle_t MonitorTimer_sem;
@@ -130,7 +129,7 @@ SemaphoreHandle_t SystemState_mutex;
 
 LEDStruct SystemState;
 
-unsigned int monitorMode;
+unsigned int monitorMode = 0;
 
 SemaphoreHandle_t MonitorMode_sem;
 
@@ -145,12 +144,13 @@ void freq_relay(){
 	if (xQueueIsQueueFullFromISR(newFreqQ) == pdFALSE)
 	{
 		xQueueSendFromISR(newFreqQ, (void *)&adcCount, NULL);
+	
 	}
 	return;
 }
 
 void vMonitoringTimerCallback(TimerHandle_t timer) {
-	xSemaphoreGive(MonitorTimer_sem);
+	xSemaphoreGiveFromISR(MonitorTimer_sem,NULL);
 }
 
 // ISR for handling PS/2 keyboard presses
@@ -215,129 +215,228 @@ void ps2_isr (void* context, alt_u32 id){
 
 /*---------- TASK DEFINITIONS ----------*/
 
-static void LoadConnect(void ) {
-	xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
-	//All Loads reconnected
-    if (!SystemState.Green) {
+void oneshotSample(void) {
+	
 
+	int CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE);
+	CurrSwitchValue = CurrSwitchValue & 0x7F;
+
+	if (xQueueSend(SwitchQ, &CurrSwitchValue, portMAX_DELAY) != pdTRUE) {
+		printf("failed INIT switch send \n");
+	} 
+
+}
+
+void LoadConnect() {
+	LEDStruct state2send;
+
+	xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
+
+	state2send = SystemState;
+	printf("%d \n",SystemState.Green);
+
+	xSemaphoreGive(SystemState_mutex);
+
+	//All Loads reconnected
+    if (!(state2send.Green)) {
 		//Monitor mode semaphore 
-		xSemaphoreTake(MonitorMode_sem,portMAX_DELAY);
+		//xSemaphoreTake(MonitorMode_sem,portMAX_DELAY);
 
 		monitorMode = 0;
 		xTimerStop(MonitoringTimer, 500);
+		//oneshotSample();
 
-		xSemaphoreGive(MonitorMode_sem);
+		//xSemaphoreGive(MonitorMode_sem);
+		return ;
+
 	} else {
-		unsigned int ret = 1;
+		unsigned int ret = 64;
 		// TODO: Start from bit 7 instead
 
-		while (SystemState.Green >>= 1) {
-			ret <<= 1;
+		while (!(state2send.Green & ret)) {
+			ret >>= 1;
 		}
 
-		SystemState.Green &= ~ret; 
-		SystemState.Red |= ret;
+		state2send.Green &= ~ret; 
+		state2send.Red |= ret;
+
+		xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
+		SystemState = state2send;
+		xSemaphoreGive(SystemState_mutex);
+
+		xQueueSend(LEDQ,&state2send,50);
 	}
-	xSemaphoreGive(SystemState_mutex);
+	printf("LOAD CONNECTED \n");
 }
 
-static void LoadShed(void ) {
-	xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
-	if (!SystemState.Red) {
+void LoadShed() {
+	LEDStruct state2send;
+
+	xSemaphoreTake(SystemState_mutex, portMAX_DELAY);
+	state2send = SystemState;
+	printf("%d \n",SystemState.Red);
+	xSemaphoreGive(SystemState_mutex);
+
+	if (!(state2send.Red)) {
         return;
 	} else {
 		int num = 1;
 
-		while (!(SystemState.Red & num)){
+		while (!(state2send.Red & num)){
 			num <<= 1;
 		}
 
-		SystemState.Red &= ~num;
-		SystemState.Green |= num;
+		state2send.Red &= ~num;
+		state2send.Green |= num;
+
+		xSemaphoreTake(SystemState_mutex,50);
+		SystemState = state2send;
+		xSemaphoreGive(SystemState_mutex);
+
+		xQueueSend(LEDQ,&state2send,50);
 	}
-	xSemaphoreGive(SystemState_mutex);
+	printf("LOAD SHEDED \n");
 }
 
-static void LoadManagement(void *pvParameters) {
+void LoadManagement(void *pvParameters) {
 	unsigned int temp;
+	LEDStruct state2send;
+	int oneshot = 0;
 	
 	while (1) {
+		
 		//TODO: See if taking multiple Mutexes at once leads to possible race conditions
 		//May have to change to instantly giving the mutex once checked
-		xSemaphoreTake(maintenanceModeFlag_mutex, portMAX_DELAY);
-		if (!maintenanceModeFlag) {
+		//xSemaphoreTake(maintenanceModeFlag_mutex, portMAX_DELAY);
+		//if (!maintenanceModeFlag) {
 
-			xSemaphoreGive(maintenanceModeFlag_mutex);
+			//xSemaphoreGive(maintenanceModeFlag_mutex);
 
-			xSemaphoreTake(MonitorMode_sem, portMAX_DELAY);
+			//if (xSemaphoreTake(MonitorMode_sem, portMAX_DELAY) == pdTRUE) {
 
+				if (!monitorMode) {
+					if (oneshot) {
+						oneshot = 0;
+						oneshotSample();
+					}
+					//Normal Mode
+					if (xQueueReceive(SwitchQ, &temp, portMAX_DELAY) == pdTRUE) {
 
-			if (!monitorMode) {
-				//Normal Mode
-				if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
-					xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
-					SystemState.Red = temp;
-					SystemState.Green = 0;
-					xSemaphoreGive(SystemState_mutex);
+						xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
+						SystemState.Red = temp;
+						SystemState.Green = 0;
+						state2send = SystemState;
+						xSemaphoreGive(SystemState_mutex);
+
+						if (xQueueSend(LEDQ,&state2send,40) == pdTRUE) {
+							printf("Sent!!! \n");
+						}
+
+						xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY);
+						//Checking Instability whilst in NOrmal operation
+						if (InStabilityFlag) {
+							//LoadShed();
+							xTimerStart(MonitoringTimer, 0);
+							monitorMode = 1;
+						}
+
+						xSemaphoreGive(InStabilityFlag_mutex);
+					}
+
+				} else {
+					//Moniter Semaphore Running
+					xSemaphoreGive(monitorTimerControl_sem);
+					
+					if (xQueueReceive(SwitchQ,&temp, 50) == pdTRUE) {
+						oneshot = 1;
+
+						if (xSemaphoreTake(SystemState_mutex,portMAX_DELAY) == pdTRUE ) {
+						//If maybe redundant here
+
+								SystemState.Red = SystemState.Red & temp;
+								SystemState.Green = SystemState.Green & temp;
+
+								state2send = SystemState;
+
+								xQueueSend(LEDQ,&state2send,40);
+							
+							xSemaphoreGive(SystemState_mutex);
+						}
+					}
 				}
-
-				xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY);
-				//Checking Instability whilst in NOrmal operation
-				if (InStabilityFlag) {
-					LoadShed();
-					xTimerStart(MonitoringTimer, 0);
-					monitorMode = 1;
-				}
-
-				xSemaphoreGive(InStabilityFlag_mutex);
-				xSemaphoreGive(MonitorMode_sem);
-
-			} else {
-				//Moniter Semaphore Running
-				xSemaphoreGive(monitorTimerControl_sem);
-				xSemaphoreGive(monitorSwitchLogic_sem);
-
-				xSemaphoreGive(MonitorMode_sem);
-			}
-		} else {
+			//	xSemaphoreGive(MonitorMode_sem);
+			//}
+			
+		/*} else {
 			//Maintenance Mode
 			//TODO: Add more Logic
 			xSemaphoreGive(maintenanceModeFlag_mutex);
 
 			if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
 
-				xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
+				if (xSemaphoreTake(SystemState_mutex,portMAX_DELAY)  == pdTRUE ){
 					SystemState.Red = temp;
 					SystemState.Green = 0;
-				xSemaphoreGive(SystemState_mutex);
-			}
-		}
-	}
-}
-
-static void MonitorSwitchLogic(void *pvParameters) {
-	unsigned int temp;
-
-	while (1) {
-		if (xSemaphoreTake(monitorSwitchLogic_sem,portMAX_DELAY) == pdTRUE) {
-			if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
-				xSemaphoreTake(SystemState_mutex,portMAX_DELAY);
-				//If maybe redundant here
-				if (temp < SystemState.Red) {
-					SystemState.Red = SystemState.Red & temp;
-					SystemState.Green = SystemState.Green & temp;
+					state2send = SystemState;
+					xQueueSend(LEDQ,&state2send,40);
+					xSemaphoreGive(SystemState_mutex);
 				}
-				xSemaphoreGive(SystemState_mutex);
+			}
+		} */
+		/*
+		if (xQueueReceive(SwitchQ,&temp, 50) == pdTRUE) {
+
+			//xSemaphoreTake(SystemState_mutex,50);
+			//SystemState.Red = temp;
+			//SystemState.Green = 0;
+
+			state2send.Red = temp;
+			state2send.Green = 0;
+			//xSemaphoreGive(SystemState_mutex);
+
+			if (xQueueSend(LEDQ, &state2send, portMAX_DELAY) != pdTRUE) {
+				printf("Broken SEnd");
+			}
+		} */
+	}
+
+	vTaskDelay(10);
+}
+
+
+
+void MonitorSwitchLogic(void *pvParameters) {
+	unsigned int temp;
+	LEDStruct state2send;
+	usleep(25);
+	while (1) {
+
+		if (xSemaphoreTake(monitorSwitchLogic_sem,portMAX_DELAY) == pdTRUE) {
+
+			if (xQueueReceive(SwitchQ,&temp, portMAX_DELAY) == pdTRUE) {
+
+				if (xSemaphoreTake(SystemState_mutex,portMAX_DELAY) == pdTRUE ) {
+					//If maybe redundant here
+					if (temp < SystemState.Red) {
+						SystemState.Red = SystemState.Red & temp;
+						SystemState.Green = SystemState.Green & temp;
+						state2send = SystemState;
+						xQueueSend(LEDQ,&state2send,40);
+					}
+					xSemaphoreGive(SystemState_mutex);
+				}
 			}
 		}
 	}
 }
 
-static void MonitorTimer(void *pvParameters) {
+void MonitorTimer(void *pvParameters) {
 	unsigned int PrevInstabilityFlag;
-
+	usleep(25);
 	while(1) {
+
 		if (xSemaphoreTake(monitorTimerControl_sem, portMAX_DELAY) == pdTRUE) {
+
 			if ( xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY) == pdTRUE) {
 
 				if (PrevInstabilityFlag != InStabilityFlag ) {
@@ -347,81 +446,72 @@ static void MonitorTimer(void *pvParameters) {
 						printf("Timer cannot be reset");
 					}
 				}
+
 				xSemaphoreGive(InStabilityFlag_mutex);
 			}
 		}
 	}
 }
 
+void MonitorLogic(void *pvParameters) {
 
-static void LEDcontrol(void *pvParameters) {
-	while (1) {
-		if (xSemaphoreTake(SystemState_mutex,portMAX_DELAY) == pdTRUE) {
-
-			IOWR_ALTERA_AVALON_PIO_DATA(RED_LEDS_BASE, SystemState.Red);
-			IOWR_ALTERA_AVALON_PIO_DATA(GREEN_LEDS_BASE, SystemState.Green);
-
-			xSemaphoreGive(SystemState_mutex);
-		} else {
-			printf("Dead \n");
-			xSemaphoreGive(SystemState_mutex);
-		}
-	}
-}
-
-static void MonitorLogic(void *pvParameters) {
 	while (1){
 		if (xSemaphoreTake(MonitorTimer_sem,portMAX_DELAY) == pdTRUE) {
-			xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY);
-			if (InStabilityFlag) {
-				LoadShed();
-			} else {
-				LoadConnect();
+
+			if (xSemaphoreTake(InStabilityFlag_mutex, portMAX_DELAY) == pdTRUE){
+				printf("Monitor MOde: %d \n", monitorMode);
+				if (InStabilityFlag) {
+					LoadShed();
+					printf("Unstable\n");
+				} else {
+					LoadConnect();
+					printf("Stable\n");
+				}
+
 			}
+			xSemaphoreGive(InStabilityFlag_mutex);
 		}
-		xSemaphoreGive(InStabilityFlag_mutex);
 	}
 }
 
 
-static void WallSwitchPoll(void *pvParameters) {
+void LEDcontrol(void *pvParameters) {
+	LEDStruct Status;
+	while (1) {
+		if (xQueueReceive(LEDQ, &Status, portMAX_DELAY ) == pdTRUE ) {
+
+			IOWR_ALTERA_AVALON_PIO_DATA(RED_LEDS_BASE, Status.Red);
+			IOWR_ALTERA_AVALON_PIO_DATA(GREEN_LEDS_BASE, Status.Green);
+
+		} else {
+			printf("Dead Que \n");
+		}
+	}
+}
+
+
+void WallSwitchPoll(void *pvParameters) {
 
 	unsigned int CurrSwitchValue = 0;
 	unsigned int PrevSwitchValue = 0;
-	printf("WALL SWITCH \n");
-
-	CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
-		if (xQueueSend(SwitchQ, &CurrSwitchValue, 10) !=pdTRUE) {
-			printf("failed INIT switch send \n");
-		}
+	oneshotSample();
 
   while (1){
-   		xSemaphoreTake(maintenanceModeFlag_mutex, portMAX_DELAY);
+	  	//REMOVED MAINTANCE MODE CHECK --MUTEX DEPENDANACE
+				CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE);
+				CurrSwitchValue = CurrSwitchValue & 0x7F;
 
-		if (!maintenanceModeFlag) {
-
-			xSemaphoreGive(maintenanceModeFlag_mutex);
-
-			CurrSwitchValue = IORD_ALTERA_AVALON_PIO_DATA(SLIDE_SWITCH_BASE) & 0x7F;
-			
-			if (monitorMode && (CurrSwitchValue < PrevSwitchValue)) {
-				if (xQueueSend(SwitchQ, &CurrSwitchValue, 10) != pdTRUE) {
-						printf("failed to send");
+					if (CurrSwitchValue != PrevSwitchValue ) {
+						if (xQueueSend(SwitchQ, &CurrSwitchValue, portMAX_DELAY) != pdTRUE) {
+							printf("failed to send \n");
+						} 
 					}
-			} else {
-				if (CurrSwitchValue != PrevSwitchValue ) {
-					if (xQueueSend(SwitchQ, &CurrSwitchValue, 10) != pdTRUE) {
-						printf("failed to send");
-					} 
-				}
-			}
-			PrevSwitchValue = CurrSwitchValue;
-		}
+				
+				PrevSwitchValue = CurrSwitchValue;
 
-		xSemaphoreGive(maintenanceModeFlag_mutex);
+ 	 vTaskDelay(100);
+	}
 
-  //vTaskDelay(10);
-  }
 }
 
 // Checks the newFreqQ for new frequencies, calculates rate of change
@@ -429,6 +519,8 @@ static void WallSwitchPoll(void *pvParameters) {
 // Sends frequency information to the VGA Display Task
 void StabilityControlCheck(void *pvParameters)
 {
+	printf("Stability Control Check");
+	usleep(25);
 	// Stores old frequency and ADC count for rate of change calculation
 	double oldFreq = 0;
 	unsigned int oldCount = 0;
@@ -491,6 +583,7 @@ void StabilityControlCheck(void *pvParameters)
 				if ((newFreq < lowerFreqBound_local) || (rocLocal > rocBound_local))
 				{
 					InStabilityFlag = 1;
+					
 				}
 			}
 			// Check unstable system for stability
@@ -500,6 +593,7 @@ void StabilityControlCheck(void *pvParameters)
 				if ((newFreq >= lowerFreqBound_local) && (rocLocal <= rocBound_local))
 				{
 					InStabilityFlag = 0;
+					
 				}
 			}
 			xSemaphoreGive(InStabilityFlag_mutex);
@@ -796,17 +890,29 @@ double array2double(unsigned int *newVal)
 
 // Creates all tasks used
 int CreateTasks() {
-	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
-	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 2, NULL);
-	xTaskCreate(VGADisplayTask, "VGADisplay", TASK_STACKSIZE, NULL, 3, NULL);
-	xTaskCreate(LoadManagement,"LDM",TASK_STACKSIZE,NULL,4,NULL);
-	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,5,NULL);
-	xTaskCreate(KeyboardReader, "KeyboardReader", TASK_STACKSIZE, NULL, 6, NULL);
-	xTaskCreate(LCDUpdater, "LCDUpdater", TASK_STACKSIZE, NULL, 7, NULL);
 
-	xTaskCreate(MonitorLogic, "ML",TASK_STACKSIZE, NULL, 8, NULL);
-	xTaskCreate(MonitorSwitchLogic,"SML",TASK_STACKSIZE, NULL, 9, NULL);
-	xTaskCreate(MonitorTimer, "MT",TASK_STACKSIZE, NULL, 10, NULL);
+
+	xTaskCreate(WallSwitchPoll, "SwitchPoll", TASK_STACKSIZE, NULL, 1, NULL);
+
+	xTaskCreate(StabilityControlCheck, "StabCheck", TASK_STACKSIZE, NULL, 6, NULL);
+
+	//xTaskCreate(VGADisplayTask, "VGADisplay", TASK_STACKSIZE, NULL, 3, NULL);
+
+	xTaskCreate(LoadManagement,"LDM",TASK_STACKSIZE,NULL,5,NULL);
+
+	xTaskCreate(LEDcontrol,"LCC",TASK_STACKSIZE,NULL,2,NULL);
+
+	//xTaskCreate(KeyboardReader, "KeyboardReader", TASK_STACKSIZE, NULL, 6, NULL);
+
+	//xTaskCreate(LCDUpdater, "LCDUpdater", TASK_STACKSIZE, NULL, 7, NULL);
+
+	xTaskCreate(MonitorLogic, "ML",TASK_STACKSIZE, NULL, 4, NULL);
+
+	//xTaskCreate(MonitorSwitchLogic,"SML",TASK_STACKSIZE, NULL, 4, NULL);
+
+	xTaskCreate(MonitorTimer, "MT",TASK_STACKSIZE, NULL, 3, NULL);
+
+	printf("All tasks made Okay! \n");
 
 	return 0;
 }
@@ -820,17 +926,17 @@ int CreateTimers() {
 // Initialises all data structures used
 int OSDataInit() {
 	// Initialise queues
-	SwitchQ = xQueueCreate( 100, sizeof(unsigned int) );
+	SwitchQ = xQueueCreate(40, sizeof(unsigned int) );
+	LEDQ = xQueueCreate(30, sizeof(LEDStruct));
 	newFreqQ = xQueueCreate(10, sizeof( void* ));
 	vgaFreqQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 	keyboardQ = xQueueCreate(MSG_QUEUE_SIZE, sizeof( void* ));
 
 	// Initialise Semaphores
 	lcdUpdate_sem = xSemaphoreCreateBinary();
-
 	monitorTimerControl_sem = xSemaphoreCreateBinary();
 	monitorSwitchLogic_sem = xSemaphoreCreateBinary();
-
+	MonitorTimer_sem = xSemaphoreCreateBinary();
 
 	// Initialise mutexes
 	roc_mutex = xSemaphoreCreateMutex();
@@ -839,14 +945,16 @@ int OSDataInit() {
 	lowerFreqBound_mutex = xSemaphoreCreateMutex();
 	rocBound_mutex = xSemaphoreCreateMutex();
 	whichBoundFlag_mutex = xSemaphoreCreateMutex();
-	MonitorTimer_sem = xSemaphoreCreateBinary();
+	SystemState_mutex = xSemaphoreCreateMutex();
 
 	return 0;
 }
 
 int main(int argc, char* argv[], char* envp[])
 {
+	printf("\n\n\n");
 	printf("Hello from Nios II!\n");
+	printf("Hello from Freq Relay Program!\n");
 
 	// Initialise data structures
 	OSDataInit();
@@ -854,6 +962,9 @@ int main(int argc, char* argv[], char* envp[])
 	// Create all tasks
 	CreateTasks();
 
+	CreateTimers();
+	/*
+	printf("PS2 CHECK\n");
 	// Initialise PS2 device
 	alt_up_ps2_dev * ps2_device = alt_up_ps2_open_dev(PS2_NAME);
 
@@ -866,13 +977,18 @@ int main(int argc, char* argv[], char* envp[])
 	alt_up_ps2_clear_fifo(ps2_device);
 	alt_irq_register(PS2_IRQ, ps2_device, ps2_isr);
 	IOWR_8DIRECT(PS2_BASE,4,1);
-
+*/
 	// Register Frequency Analyser ISR
 	alt_irq_register(FREQUENCY_ANALYSER_IRQ, 0, freq_relay);
 
+/*
+
+	printf("schduler start init\n");
+	usleep(25);
+	*/
 	// Start Scheduler
 	vTaskStartScheduler();
-
+	printf("schduler heap insufficient?!\n");
 	// Program will only reach here if insufficient heap to start scheduler
 	for(;;) {
 		;
